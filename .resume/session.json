@@ -1,0 +1,86 @@
+{
+  "project": "resume",
+  "started_at": "2026-03-17T00:35:47.867356Z",
+  "events": [
+    {
+      "timestamp": "2026-03-17T00:48:57.874993Z",
+      "event_type": "file_change",
+      "content": "/Users/nikhilyachareni/Documents/Projects/resume/src/summarize.rs.tmp.7338.1773708537862"
+    },
+    {
+      "timestamp": "2026-03-17T00:48:57.875334Z",
+      "event_type": "file_change",
+      "content": "/Users/nikhilyachareni/Documents/Projects/resume/src/summarize.rs.tmp.7338.1773708537862"
+    },
+    {
+      "timestamp": "2026-03-17T00:48:57.875466Z",
+      "event_type": "file_change",
+      "content": "/Users/nikhilyachareni/Documents/Projects/resume/src/summarize.rs.tmp.7338.1773708537862"
+    },
+    {
+      "timestamp": "2026-03-17T00:48:57.875592Z",
+      "event_type": "file_change",
+      "content": "/Users/nikhilyachareni/Documents/Projects/resume/src/summarize.rs.tmp.7338.1773708537862"
+    },
+    {
+      "timestamp": "2026-03-17T00:48:57.875733Z",
+      "event_type": "file_change",
+      "content": "/Users/nikhilyachareni/Documents/Projects/resume/src/summarize.rs.tmp.7338.1773708537862"
+    },
+    {
+      "timestamp": "2026-03-17T00:48:57.875879Z",
+      "event_type": "file_change",
+      "content": "/Users/nikhilyachareni/Documents/Projects/resume/src/summarize.rs.tmp.7338.1773708537862"
+    },
+    {
+      "timestamp": "2026-03-17T00:48:57.876038Z",
+      "event_type": "file_change",
+      "content": "/Users/nikhilyachareni/Documents/Projects/resume/src/summarize.rs"
+    },
+    {
+      "timestamp": "2026-03-17T00:48:57.876209Z",
+      "event_type": "file_change",
+      "content": "/Users/nikhilyachareni/Documents/Projects/resume/src/summarize.rs"
+    },
+    {
+      "timestamp": "2026-03-17T00:49:02.500646Z",
+      "event_type": "file_change",
+      "content": "/Users/nikhilyachareni/Documents/Projects/resume/CLAUDE.md.tmp.7338.1773708542489"
+    },
+    {
+      "timestamp": "2026-03-17T00:49:02.500962Z",
+      "event_type": "file_change",
+      "content": "/Users/nikhilyachareni/Documents/Projects/resume/CLAUDE.md.tmp.7338.1773708542489"
+    },
+    {
+      "timestamp": "2026-03-17T00:49:02.501209Z",
+      "event_type": "file_change",
+      "content": "/Users/nikhilyachareni/Documents/Projects/resume/CLAUDE.md.tmp.7338.1773708542489"
+    },
+    {
+      "timestamp": "2026-03-17T00:49:02.501462Z",
+      "event_type": "file_change",
+      "content": "/Users/nikhilyachareni/Documents/Projects/resume/CLAUDE.md.tmp.7338.1773708542489"
+    },
+    {
+      "timestamp": "2026-03-17T00:49:02.501723Z",
+      "event_type": "file_change",
+      "content": "/Users/nikhilyachareni/Documents/Projects/resume/CLAUDE.md.tmp.7338.1773708542489"
+    },
+    {
+      "timestamp": "2026-03-17T00:49:02.502002Z",
+      "event_type": "file_change",
+      "content": "/Users/nikhilyachareni/Documents/Projects/resume/CLAUDE.md.tmp.7338.1773708542489"
+    },
+    {
+      "timestamp": "2026-03-17T00:49:02.502280Z",
+      "event_type": "file_change",
+      "content": "/Users/nikhilyachareni/Documents/Projects/resume/CLAUDE.md"
+    },
+    {
+      "timestamp": "2026-03-17T00:49:02.502581Z",
+      "event_type": "file_change",
+      "content": "/Users/nikhilyachareni/Documents/Projects/resume/CLAUDE.md"
+    }
+  ]
+}
