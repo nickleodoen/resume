@@ -11,7 +11,11 @@ mod tui;
 mod watcher;
 
 #[derive(Parser)]
-#[command(name = "resume", about = "Developer session recorder and context restorer")]
+#[command(
+    name = "resume",
+    about = "developer session recorder and human context restorer",
+    help_template = "resume — {about}\n\n{usage-heading} {usage}\n  resume  Start a live session in this directory (Ctrl-C or `finish` to stop)\n\n{all-args}\n"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -19,21 +23,25 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Initialize resume for this project (adds .gitignore entries + shell hook)
-    Init {
+    /// End the current session and print a summary
+    Finish,
+    /// Set up resume for this project (adds .gitignore entries + shell hook)
+    New {
         /// Automatically install the shell hook into ~/.zshrc (no manual copy-paste needed)
         #[arg(long)]
         install_hook: bool,
     },
     /// Begin a session and watch for file/git changes in the background
+    #[command(hide = true)]
     Start {
         /// Run the watcher in the foreground (internal — used by daemon re-exec)
         #[arg(long, hide = true)]
         daemon: bool,
     },
     /// Stop the background session watcher
+    #[command(hide = true)]
     Stop,
-    /// Call the LLM and print a briefing for the current project
+    /// Get an AI briefing on what you were working on
     Show,
     /// Show what has been captured so far this session
     Status,
@@ -53,7 +61,14 @@ async fn main() -> Result<()> {
             // Default: run the live TUI session
             tui::run().await?;
         }
-        Some(Command::Init { install_hook }) => {
+        Some(Command::Finish) | Some(Command::Stop) => {
+            if let Some(pid) = session::read_pid()? {
+                kill_process(pid);
+                session::clear_pid()?;
+            }
+            println!("Session ended. Run `resume show` for a briefing.");
+        }
+        Some(Command::New { install_hook }) => {
             init_project(install_hook)?;
         }
         Some(Command::LogCommand { cmd }) => {
@@ -83,19 +98,6 @@ async fn main() -> Result<()> {
             session::write_pid(pid)?;
 
             println!("Session running in background (PID: {pid}). Use `resume stop` to end it.");
-        }
-        Some(Command::Stop) => {
-            match session::read_pid()? {
-                Some(pid) => {
-                    kill_process(pid);
-                    session::clear_pid()?;
-                    println!("Sent stop signal to watcher (PID {pid}).");
-                }
-                None => {
-                    println!("No background watcher found (no PID file).");
-                }
-            }
-            session::close()?;
         }
         Some(Command::Show) => {
             let sess = session::load()?;
@@ -207,7 +209,7 @@ fn init_project(install_hook: bool) -> Result<()> {
         println!("\nTo capture shell commands, add this to your ~/.zshrc (zsh) or ~/.bashrc (bash):\n");
         println!("zsh:\n{SHELL_HOOK_ZSH}");
         println!("bash:\n{SHELL_HOOK_BASH}");
-        println!("Or run `resume init --install-hook` to do it automatically.");
+        println!("Or run `resume new --install-hook` to do it automatically.");
     }
 
     Ok(())

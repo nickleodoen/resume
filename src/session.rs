@@ -122,7 +122,6 @@ pub fn init() -> Result<()> {
     let path = session_path()?;
     let json = serde_json::to_string_pretty(&sess)?;
     fs::write(&path, json).context("failed to write session.json")?;
-    println!("Session started for project '{}' — logging to {}", sess.project, path.display());
     Ok(())
 }
 

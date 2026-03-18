@@ -163,15 +163,33 @@ comment (`# --- resume shell hook ---`) to detect existing installs.
 
 ## What Was Built — Session 4 (2026-03-18)
 
-1. **TUI mode** (`src/tui.rs`, `Cargo.toml`): `resume` (no args) now launches a live ratatui/crossterm terminal dashboard. Displays a header with project name + elapsed time, a scrolling event list (newest first) with color-coded FILE/GIT/CMD badges, and a footer with event count + keybindings. Added `ratatui = "0.29"` and `crossterm = "0.28"` to Cargo.toml.
+1. **TUI mode** (`src/tui.rs`, `Cargo.toml`): `resume` (no args) now launches a live ratatui/crossterm terminal dashboard. Added `ratatui = "0.29"` and `crossterm = "0.28"`.
 
-2. **`finish` shell function** (`main.rs`): Both `SHELL_HOOK_ZSH` and `SHELL_HOOK_BASH` constants updated to include `finish() { resume stop "$@"; }` inside the hook fences. Running `finish` in the terminal now stops the session cleanly.
+2. **`finish` shell function** (`main.rs`): Both hook constants updated to include `finish() { resume stop "$@"; }`.
 
-3. **Watcher signal architecture** (`watcher.rs`): `watch()` signature changed to `watch(ui_tx: Option<UnboundedSender<SessionEvent>>, shutdown: Option<oneshot::Receiver<()>>)`. In TUI mode, the TUI owns a oneshot sender; when Ctrl-C is pressed in the TUI, it sends on the channel, causing the watcher to cleanly exit. This avoids a conflict where both the TUI and the watcher would compete to handle Ctrl-C. `log_git_diff` also accepts `ui_tx` and sends GitDiff events to the TUI. All daemon call sites pass `(None, None)`.
+3. **Watcher signal architecture** (`watcher.rs`): `watch(ui_tx, shutdown)` — TUI sends oneshot to shut down watcher on Ctrl-C cleanly.
 
-4. **VS Code integration** (`.vscode/settings.json`, `.vscode/tasks.json`): Terminal font, size, and truecolor env vars configured for a clean TUI experience. Three VS Code tasks defined: `resume: start session`, `resume: show briefing`, `resume: status`.
+4. **VS Code integration** (`.vscode/`): truecolor env, font config, three task shortcuts.
 
-5. **`cargo build --release`** confirmed clean with zero warnings.
+5. **`cargo build --release`** confirmed clean.
+
+## What Was Built — Session 5 (2026-03-18)
+
+1. **Resy redesigned as stingray** (`src/tui.rs`): 9-line ASCII stingray, top-down view. Asymmetric eyes (`O` = wide open, `@` = unhinged). Wavy mouth `~~~~~`. Full wingspan line `|___________|`. Tail + barb `\|||/`. Name tag `Resy ~*`. ASCII-only for guaranteed single-column-width.
+
+2. **RESUME banner fixed** (`src/tui.rs`): Replaced `█ ╗ ╚ ═` block/box chars (ambiguous double-width in Nerd Fonts) with ASCII-only figlet Standard font art (~40 chars wide, 5 lines). Uses raw strings `r"..."` for backslash literals. No more layout overflow.
+
+3. **Brand palette switched to standard ANSI** (`src/tui.rs`):
+   - `PURPLE = Color::LightMagenta` — bright pink-purple, always renders correctly
+   - `PURPLE_MID = Color::Magenta` — medium purple, used for borders and Resy body
+   - `PURPLE_DIM = Color::DarkGray` — dim chrome
+   - Root cause of missing color: `Color::Rgb(188, 108, 255)` requires explicit truecolor detection; ANSI named colors work on all terminals unconditionally.
+
+4. **Event wrapping fixed**: Content truncated to 40 chars (down from 55). Total row width: 7+40+10 = 57 cols, safe on any terminal ≥ 60 wide.
+
+5. **Root causes documented**:
+   - Block elements (U+2580-U+259F like `█`) have "ambiguous" east Asian width — Nerd Fonts treat them as 2 columns. A 52-char art string becomes ~100 columns at runtime.
+   - `Color::Rgb()` requires `COLORTERM=truecolor` to be set *before* the process starts; standard ANSI colors do not.
 
 ## Known Issues / Bugs
 
