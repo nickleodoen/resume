@@ -19,6 +19,9 @@ const GIT_DIFF_INTERVAL: u32 = 5;
 /// Suppress duplicate events for the same path within this window.
 const DEBOUNCE_SECS: u64 = 2;
 
+/// Maximum bytes to store for a single git diff snapshot.
+const MAX_DIFF_BYTES: usize = 8_000;
+
 const IGNORED_DIRS: &[&str] = &[".git", "target", "node_modules", ".resume"];
 
 /// Filename suffixes and patterns that are always noise (editor temps, swap files, etc.).
@@ -48,14 +51,34 @@ fn is_filtered(path: &Path) -> bool {
     is_ignored_dir(path) || is_noise_file(path)
 }
 
-fn describe_event(event: &Event) -> Option<String> {
+/// Truncate a diff to at most `max` bytes, appending a note if truncated.
+fn truncate_diff(diff: String, max: usize) -> String {
+    if diff.len() <= max {
+        return diff;
+    }
+    let total = diff.len();
+    // Truncate at a UTF-8 boundary.
+    let mut end = max;
+    while !diff.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n[diff truncated — {total} bytes total]", &diff[..end])
+}
+
+/// Build a relative-path description string for a notify event.
+fn describe_event(event: &Event, cwd: &Path) -> Option<String> {
     match event.kind {
         EventKind::Create(_) | EventKind::Modify(_) => {
             let paths: Vec<String> = event
                 .paths
                 .iter()
                 .filter(|p| !is_filtered(p))
-                .map(|p| p.display().to_string())
+                .map(|p| {
+                    p.strip_prefix(cwd)
+                        .unwrap_or(p)
+                        .display()
+                        .to_string()
+                })
                 .collect();
             if paths.is_empty() {
                 None
@@ -70,7 +93,8 @@ fn describe_event(event: &Event) -> Option<String> {
 fn log_git_diff(cwd: &Path, last_diff: &mut String) {
     match git::current_diff(cwd) {
         Ok(diff) if !diff.is_empty() && diff != *last_diff => {
-            let ev = SessionEvent::new(EventType::GitDiff, diff.clone());
+            let stored = truncate_diff(diff.clone(), MAX_DIFF_BYTES);
+            let ev = SessionEvent::new(EventType::GitDiff, stored);
             if let Err(e) = append_event(ev) {
                 eprintln!("warn: failed to log git diff: {e}");
             }
@@ -81,7 +105,7 @@ fn log_git_diff(cwd: &Path, last_diff: &mut String) {
     }
 }
 
-/// Start watching the current directory. Runs until SIGINT (Ctrl-C).
+/// Start watching the current directory. Runs until SIGINT (Ctrl-C) or SIGTERM.
 pub async fn watch() -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get cwd")?;
     println!("Watching {} — press Ctrl-C to stop.", cwd.display());
@@ -107,7 +131,7 @@ pub async fn watch() -> Result<()> {
         for res in rx {
             match res {
                 Ok(event) => {
-                    if let Some(desc) = describe_event(&event) {
+                    if let Some(desc) = describe_event(&event, &cwd_clone) {
                         // Debounce: skip if this path was logged within the window.
                         let now = Instant::now();
                         if let Some(last) = last_seen.get(&desc) {
@@ -133,7 +157,33 @@ pub async fn watch() -> Result<()> {
         }
     });
 
-    signal::ctrl_c().await.context("failed to listen for ctrl-c")?;
+    // Wait for Ctrl-C or SIGTERM (graceful shutdown).
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        )
+        .context("failed to listen for sigterm")?;
+        tokio::select! {
+            _ = signal::ctrl_c() => {},
+            _ = sigterm.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        signal::ctrl_c().await.context("failed to listen for ctrl-c")?;
+    }
+
+    // Final diff snapshot on shutdown.
+    let shutdown_cwd = std::env::current_dir().unwrap_or_default();
+    if let Ok(diff) = crate::git::current_diff(&shutdown_cwd) {
+        if !diff.is_empty() {
+            let stored = truncate_diff(diff, MAX_DIFF_BYTES);
+            let ev = SessionEvent::new(EventType::GitDiff, stored);
+            let _ = append_event(ev);
+        }
+    }
+
     println!("\nWatcher stopped.");
     Ok(())
 }

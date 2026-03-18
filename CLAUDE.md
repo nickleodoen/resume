@@ -88,6 +88,24 @@ resume status
   - Uses `dirs::home_dir()` to locate `~/.zshrc` cross-platform
   - zsh hook uses `preexec_functions` and `&!` (disown) so it never blocks the shell
 
+## What Was Built — Session 3 (2026-03-18)
+
+Seven production-hardening improvements, all with a clean `cargo build`:
+
+1. **File locking** (`session.rs`, `Cargo.toml`): Added `fs2 = "0.4"`. New `with_session_lock<F,T>()` helper opens/creates `.resume/session.lock`, calls `FileExt::lock_exclusive()`, runs the closure, then unlocks. `append_event` is now wrapped in this lock so concurrent writers (daemon + shell hook) can't clobber each other.
+
+2. **Relative paths in session.json** (`watcher.rs`): `describe_event` now accepts `cwd: &Path` and strips it from each path via `path.strip_prefix(cwd).unwrap_or(path)`. Session events now store `src/main.rs` instead of `/Users/.../src/main.rs`.
+
+3. **Truncate large git diffs** (`watcher.rs`): Added `MAX_DIFF_BYTES = 8_000`. New `truncate_diff(diff, max) -> String` helper truncates at a UTF-8 char boundary and appends `"[diff truncated — N bytes total]"`. Used in both `log_git_diff` and the shutdown path.
+
+4. **SIGTERM handling + final diff on shutdown** (`watcher.rs`): On Unix, `watch()` now uses `tokio::select!` to listen for both `ctrl_c` and `sigterm.recv()`. After the signal, a final git diff is captured and appended before printing "Watcher stopped."
+
+5. **Bash hook support** (`main.rs`): `install_zsh_hook` replaced by `install_shell_hook()` + `install_hook_into_file()`. Detects `$SHELL`: zsh → writes `SHELL_HOOK_ZSH` to `~/.zshrc`; bash → writes `SHELL_HOOK_BASH` to `~/.bashrc` (or `~/.bash_profile`); unknown → prints both snippets. Renamed constants to `SHELL_HOOK_ZSH` / `SHELL_HOOK_BASH` / `SHELL_HOOK_SENTINEL`.
+
+6. **Graceful `resume stop` / `resume status` with no session** (`session.rs`, `main.rs`): `close()` now checks for file existence first and prints "No session found." instead of hard-erroring. `resume status` in `main.rs` catches `load()` errors and prints a friendly message.
+
+7. **Corrupt session.json recovery** (`session.rs`): `load()` now catches `serde_json` parse failures, prints `"warn: session.json is corrupt, starting fresh"`, overwrites the file with a fresh empty session, and returns it instead of propagating the error.
+
 ## Packaging Intent (important — read before distributing)
 
 When this tool is packaged (Homebrew formula, cargo-install, installer script, etc.), the shell hook
@@ -105,8 +123,8 @@ comment (`# --- resume shell hook ---`) to detect existing installs.
 
 ## In Progress / Unfinished
 
-- No bash hook yet (only zsh `preexec_functions` is supported); bash users need `trap DEBUG`
-- Shell hook requires a new terminal or `source ~/.zshrc` after install
+- Shell hook requires a new terminal or `source ~/.zshrc` / `source ~/.bashrc` after install
+- The `last_seen` debounce map in `watcher.rs` grows unbounded for very long sessions (low priority)
 
 - Event deduplication + noise filtering in `watcher.rs` (session 2, continued):
   - `DEBOUNCE_SECS = 2`: same path logged within 2 seconds is suppressed via `HashMap<String, Instant>`
@@ -119,8 +137,8 @@ comment (`# --- resume shell hook ---`) to detect existing installs.
 ## Next Steps (Priority Order)
 
 1. End-to-end test: `cargo build --release`, `resume init --install-hook`, `resume start`, do work, `resume show`
-2. Add bash hook support in `resume init --install-hook` (detect `$SHELL`, write to `~/.bashrc`)
-3. Periodically evict stale entries from the `last_seen` debounce map (currently grows unbounded for long sessions)
+2. Periodically evict stale entries from the `last_seen` debounce map (low priority — only matters for multi-hour sessions)
+3. Write a proper integration test (create temp dir, start session, append events, verify JSON, check lock)
 
 ## Key Decisions
 
@@ -131,8 +149,12 @@ comment (`# --- resume shell hook ---`) to detect existing installs.
 | `append_event` reads+writes entire file | Simple; session files are small. Can optimize to append-only JSONL later if needed |
 | `claude-sonnet-4-6` model | Good balance of quality and cost; opus was too expensive for routine briefings |
 | `watcher::watch()` blocks on Ctrl-C | Simple for v1; daemon mode is next step |
+| `fs2` for file locking | Minimal dep, cross-platform, POSIX `flock` semantics; avoids rolling a custom advisory lock |
+| Corrupt session → overwrite with fresh | Better than crashing; session data is observability not source of truth |
+| `MAX_DIFF_BYTES = 8_000` | Keeps API context lean; full diff is rarely needed for a briefing |
+| Detect `$SHELL` for hook install | Avoids requiring users to know which rc file to edit |
 
 ## Known Issues / Bugs
 
-- `reqwest 0.11` requires `openssl` on macOS; may need `brew install openssl` if build fails
-- `cargo build` passes clean as of session 2
+- `reqwest 0.11` requires `openssl` on macOS; may need `brew install openssl` if build fails (using `rustls-tls` feature avoids this)
+- `cargo build` passes clean as of session 3

@@ -98,8 +98,10 @@ async fn main() -> Result<()> {
             println!("{}", briefing);
         }
         Command::Status => {
-            let sess = session::load()?;
-            session::print_status(&sess);
+            match session::load() {
+                Ok(sess) => session::print_status(&sess),
+                Err(_) => println!("No session found. Run `resume start` to begin."),
+            }
         }
     }
 
@@ -151,16 +153,26 @@ fn kill_process(pid: u32) {
 
 const GITIGNORE_ENTRIES: &str = "\n# resume session files\n.resume/\n";
 
-// Sentinel used to detect whether the hook is already installed.
-const ZSH_HOOK_SENTINEL: &str = "# --- resume shell hook ---";
+// Sentinel used to detect whether the hook is already installed (same for both shells).
+const SHELL_HOOK_SENTINEL: &str = "# --- resume shell hook ---";
 
-const ZSH_HOOK: &str = "\
+const SHELL_HOOK_ZSH: &str = "\
 # --- resume shell hook ---\n\
 _resume_preexec() {\n\
     [[ -f .resume/session.json ]] || return\n\
     resume log-command \"$1\" 2>/dev/null &!\n\
 }\n\
 preexec_functions+=(_resume_preexec)\n\
+# --- end resume shell hook ---\n";
+
+const SHELL_HOOK_BASH: &str = "\
+# --- resume shell hook ---\n\
+_resume_preexec() {\n\
+    [ -f .resume/session.json ] || return\n\
+    [ \"${BASH_SUBSHELL}\" -eq 0 ] || return\n\
+    resume log-command \"$BASH_COMMAND\" 2>/dev/null &\n\
+}\n\
+trap '_resume_preexec' DEBUG\n\
 # --- end resume shell hook ---\n";
 
 fn init_project(install_hook: bool) -> Result<()> {
@@ -183,38 +195,67 @@ fn init_project(install_hook: bool) -> Result<()> {
 
     // 2. Shell hook — auto-install or print for manual setup.
     if install_hook {
-        install_zsh_hook()?;
+        install_shell_hook()?;
     } else {
-        println!("\nTo capture shell commands, add this to your ~/.zshrc:\n");
-        println!("{ZSH_HOOK}");
+        println!("\nTo capture shell commands, add this to your ~/.zshrc (zsh) or ~/.bashrc (bash):\n");
+        println!("zsh:\n{SHELL_HOOK_ZSH}");
+        println!("bash:\n{SHELL_HOOK_BASH}");
         println!("Or run `resume init --install-hook` to do it automatically.");
     }
 
     Ok(())
 }
 
-fn install_zsh_hook() -> Result<()> {
-    let zshrc_path = dirs::home_dir()
-        .context("could not find home directory")?
-        .join(".zshrc");
+fn install_shell_hook() -> Result<()> {
+    let home = dirs::home_dir().context("could not find home directory")?;
+    let shell = std::env::var("SHELL").unwrap_or_default();
 
-    let existing = if zshrc_path.exists() {
-        std::fs::read_to_string(&zshrc_path).context("failed to read ~/.zshrc")?
+    if shell.contains("zsh") {
+        let rc_path = home.join(".zshrc");
+        install_hook_into_file(&rc_path, SHELL_HOOK_ZSH, "~/.zshrc")?;
+    } else if shell.contains("bash") {
+        // Prefer ~/.bashrc; fall back to ~/.bash_profile if it doesn't exist.
+        let bashrc = home.join(".bashrc");
+        let rc_path = if bashrc.exists() {
+            bashrc
+        } else {
+            home.join(".bash_profile")
+        };
+        let label = if rc_path.ends_with(".bashrc") { "~/.bashrc" } else { "~/.bash_profile" };
+        install_hook_into_file(&rc_path, SHELL_HOOK_BASH, label)?;
+    } else {
+        println!("Could not detect shell (SHELL={:?}).", shell);
+        println!("\nFor zsh, add to ~/.zshrc:\n\n{SHELL_HOOK_ZSH}");
+        println!("For bash, add to ~/.bashrc:\n\n{SHELL_HOOK_BASH}");
+    }
+
+    Ok(())
+}
+
+fn install_hook_into_file(
+    rc_path: &std::path::Path,
+    hook: &str,
+    label: &str,
+) -> Result<()> {
+    let existing = if rc_path.exists() {
+        std::fs::read_to_string(rc_path)
+            .with_context(|| format!("failed to read {label}"))?
     } else {
         String::new()
     };
 
-    if existing.contains(ZSH_HOOK_SENTINEL) {
-        println!("Shell hook already present in ~/.zshrc — skipping.");
+    if existing.contains(SHELL_HOOK_SENTINEL) {
+        println!("Shell hook already present in {label} — skipping.");
         return Ok(());
     }
 
     let mut content = existing;
     content.push('\n');
-    content.push_str(ZSH_HOOK);
-    std::fs::write(&zshrc_path, content).context("failed to write ~/.zshrc")?;
+    content.push_str(hook);
+    std::fs::write(rc_path, content)
+        .with_context(|| format!("failed to write {label}"))?;
 
-    println!("Shell hook installed in ~/.zshrc.");
-    println!("Run `source ~/.zshrc` (or open a new terminal) to activate it.");
+    println!("Shell hook installed in {label}.");
+    println!("Run `source {label}` (or open a new terminal) to activate it.");
     Ok(())
 }

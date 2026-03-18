@@ -3,8 +3,9 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -59,8 +60,31 @@ fn session_path() -> Result<PathBuf> {
     Ok(resume_dir()?.join("session.json"))
 }
 
+fn lock_path() -> Result<PathBuf> {
+    Ok(resume_dir()?.join("session.lock"))
+}
+
 fn pid_path() -> Result<PathBuf> {
     Ok(resume_dir()?.join("resume.pid"))
+}
+
+/// Acquire an exclusive lock on .resume/session.lock, call f(), then release.
+fn with_session_lock<F, T>(f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T>,
+{
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path()?)
+        .context("failed to open session lock file")?;
+    lock_file
+        .lock_exclusive()
+        .context("failed to acquire session lock")?;
+    let result = f();
+    let _ = lock_file.unlock();
+    result
 }
 
 pub fn write_pid(pid: u32) -> Result<()> {
@@ -102,27 +126,57 @@ pub fn init() -> Result<()> {
     Ok(())
 }
 
-/// Load the current session from disk. Fails if no session has been started.
+/// Load the current session from disk.
+/// If session.json is corrupt, prints a warning, overwrites with a fresh session, and returns it.
 pub fn load() -> Result<Session> {
     let path = session_path()?;
+    if !path.exists() {
+        anyhow::bail!("no session found at {}. Run `resume start` first.", path.display());
+    }
     let json = fs::read_to_string(&path)
-        .with_context(|| format!("no session found at {}. Run `resume start` first.", path.display()))?;
-    let sess: Session = serde_json::from_str(&json).context("failed to parse session.json")?;
-    Ok(sess)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    match serde_json::from_str::<Session>(&json) {
+        Ok(sess) => Ok(sess),
+        Err(_) => {
+            eprintln!("warn: session.json is corrupt, starting fresh");
+            let project = std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("unknown"))
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "unknown".to_string());
+            let sess = Session::new(project);
+            let fresh_json = serde_json::to_string_pretty(&sess)?;
+            fs::write(&path, fresh_json).context("failed to overwrite corrupt session.json")?;
+            Ok(sess)
+        }
+    }
 }
 
-/// Append a single event to the session on disk.
+/// Append a single event to the session on disk (protected by an exclusive file lock).
 pub fn append_event(event: SessionEvent) -> Result<()> {
-    let mut sess = load()?;
-    sess.events.push(event);
-    let path = session_path()?;
-    let json = serde_json::to_string_pretty(&sess)?;
-    fs::write(path, json)?;
-    Ok(())
+    with_session_lock(|| {
+        let mut sess = load()?;
+        sess.events.push(event);
+        let path = session_path()?;
+        let json = serde_json::to_string_pretty(&sess)?;
+        fs::write(path, json)?;
+        Ok(())
+    })
 }
 
-/// Mark the session as closed (currently just confirms it's saved).
+/// Mark the session as closed (prints a summary). No-op if no session exists.
 pub fn close() -> Result<()> {
+    let path = match session_path() {
+        Ok(p) => p,
+        Err(_) => {
+            println!("No session found.");
+            return Ok(());
+        }
+    };
+    if !path.exists() {
+        println!("No session found.");
+        return Ok(());
+    }
     let sess = load()?;
     println!(
         "Session closed. {} event(s) recorded since {}.",
