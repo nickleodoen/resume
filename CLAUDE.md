@@ -108,11 +108,19 @@ comment (`# --- resume shell hook ---`) to detect existing installs.
 - No bash hook yet (only zsh `preexec_functions` is supported); bash users need `trap DEBUG`
 - Shell hook requires a new terminal or `source ~/.zshrc` after install
 
+- Event deduplication + noise filtering in `watcher.rs` (session 2, continued):
+  - `DEBOUNCE_SECS = 2`: same path logged within 2 seconds is suppressed via `HashMap<String, Instant>`
+  - `NOISE_SUFFIXES`: `.swp`, `.swo`, `.swn`, `~`, `.DS_Store` filtered out
+  - `NOISE_CONTAINS`: paths with `.tmp.` or `.temp.` in the filename filtered out
+  - `NOISE_PREFIXES`: `.#` (emacs lock files) filtered out
+  - `is_filtered()` combines dir-ignore and filename-noise checks
+  - Root cause was real: a single editor save fired 3–6 notify events; `.gitignore.tmp.7338...` was leaking through
+
 ## Next Steps (Priority Order)
 
 1. End-to-end test: `cargo build --release`, `resume init --install-hook`, `resume start`, do work, `resume show`
 2. Add bash hook support in `resume init --install-hook` (detect `$SHELL`, write to `~/.bashrc`)
-3. Throttle/deduplicate noisy file events (editor autosave fires many events per second)
+3. Periodically evict stale entries from the `last_seen` debounce map (currently grows unbounded for long sessions)
 
 ## Key Decisions
 
