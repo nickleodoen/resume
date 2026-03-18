@@ -10,6 +10,7 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use tokio::signal;
+use tokio::sync::oneshot;
 
 use crate::git;
 use crate::session::{append_event, EventType, SessionEvent};
@@ -90,13 +91,20 @@ fn describe_event(event: &Event, cwd: &Path) -> Option<String> {
     }
 }
 
-fn log_git_diff(cwd: &Path, last_diff: &mut String) {
+fn log_git_diff(
+    cwd: &Path,
+    last_diff: &mut String,
+    ui_tx: Option<&tokio::sync::mpsc::UnboundedSender<SessionEvent>>,
+) {
     match git::current_diff(cwd) {
         Ok(diff) if !diff.is_empty() && diff != *last_diff => {
             let stored = truncate_diff(diff.clone(), MAX_DIFF_BYTES);
             let ev = SessionEvent::new(EventType::GitDiff, stored);
-            if let Err(e) = append_event(ev) {
+            if let Err(e) = append_event(ev.clone()) {
                 eprintln!("warn: failed to log git diff: {e}");
+            }
+            if let Some(tx) = ui_tx {
+                let _ = tx.send(ev);
             }
             *last_diff = diff;
         }
@@ -105,10 +113,12 @@ fn log_git_diff(cwd: &Path, last_diff: &mut String) {
     }
 }
 
-/// Start watching the current directory. Runs until SIGINT (Ctrl-C) or SIGTERM.
-pub async fn watch() -> Result<()> {
+/// Start watching the current directory. Runs until SIGINT (Ctrl-C), SIGTERM, or shutdown signal.
+pub async fn watch(
+    ui_tx: Option<tokio::sync::mpsc::UnboundedSender<SessionEvent>>,
+    shutdown: Option<oneshot::Receiver<()>>,
+) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to get cwd")?;
-    println!("Watching {} — press Ctrl-C to stop.", cwd.display());
 
     let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
 
@@ -121,6 +131,7 @@ pub async fn watch() -> Result<()> {
         .context("failed to watch directory")?;
 
     let cwd_clone = cwd.clone();
+    let ui_tx_clone = ui_tx.clone();
 
     tokio::task::spawn_blocking(move || {
         let mut file_change_count: u32 = 0;
@@ -142,13 +153,16 @@ pub async fn watch() -> Result<()> {
                         last_seen.insert(desc.clone(), now);
 
                         let ev = SessionEvent::new(EventType::FileChange, desc);
-                        if let Err(e) = append_event(ev) {
+                        if let Err(e) = append_event(ev.clone()) {
                             eprintln!("warn: failed to log event: {e}");
+                        }
+                        if let Some(ref tx) = ui_tx_clone {
+                            let _ = tx.send(ev);
                         }
 
                         file_change_count += 1;
                         if file_change_count % GIT_DIFF_INTERVAL == 0 {
-                            log_git_diff(&cwd_clone, &mut last_diff);
+                            log_git_diff(&cwd_clone, &mut last_diff, ui_tx_clone.as_ref());
                         }
                     }
                 }
@@ -157,21 +171,37 @@ pub async fn watch() -> Result<()> {
         }
     });
 
-    // Wait for Ctrl-C or SIGTERM (graceful shutdown).
+    // Wait for Ctrl-C, SIGTERM, or TUI shutdown signal.
     #[cfg(unix)]
     {
         let mut sigterm = tokio::signal::unix::signal(
             tokio::signal::unix::SignalKind::terminate(),
         )
         .context("failed to listen for sigterm")?;
-        tokio::select! {
-            _ = signal::ctrl_c() => {},
-            _ = sigterm.recv() => {},
+
+        if let Some(shutdown_rx) = shutdown {
+            tokio::select! {
+                _ = signal::ctrl_c() => {},
+                _ = sigterm.recv() => {},
+                _ = shutdown_rx => {},
+            }
+        } else {
+            tokio::select! {
+                _ = signal::ctrl_c() => {},
+                _ = sigterm.recv() => {},
+            }
         }
     }
     #[cfg(not(unix))]
     {
-        signal::ctrl_c().await.context("failed to listen for ctrl-c")?;
+        if let Some(shutdown_rx) = shutdown {
+            tokio::select! {
+                _ = signal::ctrl_c() => {},
+                _ = shutdown_rx => {},
+            }
+        } else {
+            signal::ctrl_c().await.context("failed to listen for ctrl-c")?;
+        }
     }
 
     // Final diff snapshot on shutdown.
@@ -180,10 +210,12 @@ pub async fn watch() -> Result<()> {
         if !diff.is_empty() {
             let stored = truncate_diff(diff, MAX_DIFF_BYTES);
             let ev = SessionEvent::new(EventType::GitDiff, stored);
+            if let Some(ref tx) = ui_tx {
+                let _ = tx.send(ev.clone());
+            }
             let _ = append_event(ev);
         }
     }
 
-    println!("\nWatcher stopped.");
     Ok(())
 }

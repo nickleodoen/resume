@@ -7,13 +7,14 @@ use clap::{Parser, Subcommand};
 mod git;
 mod session;
 mod summarize;
+mod tui;
 mod watcher;
 
 #[derive(Parser)]
 #[command(name = "resume", about = "Developer session recorder and context restorer")]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -48,18 +49,22 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Init { install_hook } => {
+        None => {
+            // Default: run the live TUI session
+            tui::run().await?;
+        }
+        Some(Command::Init { install_hook }) => {
             init_project(install_hook)?;
         }
-        Command::LogCommand { cmd } => {
+        Some(Command::LogCommand { cmd }) => {
             // Silent — called by the shell hook in a background job.
             session::log_command(&cmd)?;
         }
-        Command::Start { daemon: true } => {
+        Some(Command::Start { daemon: true }) => {
             // Running as the background daemon — do the actual work.
-            watcher::watch().await?;
+            watcher::watch(None, None).await?;
         }
-        Command::Start { daemon: false } => {
+        Some(Command::Start { daemon: false }) => {
             // Check if a session is already running.
             if let Some(existing_pid) = session::read_pid()? {
                 if process_is_running(existing_pid) {
@@ -79,7 +84,7 @@ async fn main() -> Result<()> {
 
             println!("Session running in background (PID: {pid}). Use `resume stop` to end it.");
         }
-        Command::Stop => {
+        Some(Command::Stop) => {
             match session::read_pid()? {
                 Some(pid) => {
                     kill_process(pid);
@@ -92,12 +97,12 @@ async fn main() -> Result<()> {
             }
             session::close()?;
         }
-        Command::Show => {
+        Some(Command::Show) => {
             let sess = session::load()?;
             let briefing = summarize::generate(&sess).await?;
             println!("{}", briefing);
         }
-        Command::Status => {
+        Some(Command::Status) => {
             match session::load() {
                 Ok(sess) => session::print_status(&sess),
                 Err(_) => println!("No session found. Run `resume start` to begin."),
@@ -163,6 +168,7 @@ _resume_preexec() {\n\
     resume log-command \"$1\" 2>/dev/null &!\n\
 }\n\
 preexec_functions+=(_resume_preexec)\n\
+finish() { resume stop \"$@\"; }\n\
 # --- end resume shell hook ---\n";
 
 const SHELL_HOOK_BASH: &str = "\
@@ -173,6 +179,7 @@ _resume_preexec() {\n\
     resume log-command \"$BASH_COMMAND\" 2>/dev/null &\n\
 }\n\
 trap '_resume_preexec' DEBUG\n\
+finish() { resume stop \"$@\"; }\n\
 # --- end resume shell hook ---\n";
 
 fn init_project(install_hook: bool) -> Result<()> {

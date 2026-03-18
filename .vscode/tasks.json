@@ -1,0 +1,38 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "resume: start session",
+      "type": "shell",
+      "command": "resume",
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "title": "resume",
+        "clear": true
+      },
+      "runOptions": {
+        "runOn": "default"
+      }
+    },
+    {
+      "label": "resume: show briefing",
+      "type": "shell",
+      "command": "resume show",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "title": "resume: briefing"
+      }
+    },
+    {
+      "label": "resume: status",
+      "type": "shell",
+      "command": "resume status",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    }
+  ]
+}

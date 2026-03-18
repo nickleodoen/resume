@@ -18,12 +18,17 @@ src/
 ├── session.rs    — SessionEvent / Session structs, .resume/session.json read/write
 ├── watcher.rs    — notify-based file watcher, logs FileChange events
 ├── git.rs        — git2-based diff capture, returns unified diff string
-└── summarize.rs  — Anthropic Messages API call, builds briefing from session log
+├── summarize.rs  — Anthropic Messages API call, builds briefing from session log
+└── tui.rs        — ratatui/crossterm live event dashboard (default `resume` mode)
 ```
 
 ### Data Flow
 
 ```
+resume (no args)
+  → tui::run()            calls session::init(), spawns watcher::watch(Some(tx), Some(shutdown_rx))
+                          renders live ratatui dashboard; Ctrl-C sends shutdown signal and exits
+
 resume start
   → session::init()       creates .resume/session.json
   → watcher::watch()      loops until Ctrl-C, appending FileChange events
@@ -136,9 +141,11 @@ comment (`# --- resume shell hook ---`) to detect existing installs.
 
 ## Next Steps (Priority Order)
 
-1. End-to-end test: `cargo build --release`, `resume init --install-hook`, `resume start`, do work, `resume show`
-2. Periodically evict stale entries from the `last_seen` debounce map (low priority — only matters for multi-hour sessions)
-3. Write a proper integration test (create temp dir, start session, append events, verify JSON, check lock)
+1. End-to-end test: `cargo install --path .`, `resume init --install-hook`, open a new terminal, run `resume`, do work, press Ctrl-C or `finish`, then `resume show`
+2. TUI: make the event list scrollable (currently just renders newest-first, no scroll state)
+3. TUI: show a live git diff panel on the right side (split layout) for the most recent diff
+4. Periodically evict stale entries from the `last_seen` debounce map (low priority — only matters for multi-hour sessions)
+5. Write a proper integration test (create temp dir, start session, append events, verify JSON, check lock)
 
 ## Key Decisions
 
@@ -154,7 +161,19 @@ comment (`# --- resume shell hook ---`) to detect existing installs.
 | `MAX_DIFF_BYTES = 8_000` | Keeps API context lean; full diff is rarely needed for a briefing |
 | Detect `$SHELL` for hook install | Avoids requiring users to know which rc file to edit |
 
+## What Was Built — Session 4 (2026-03-18)
+
+1. **TUI mode** (`src/tui.rs`, `Cargo.toml`): `resume` (no args) now launches a live ratatui/crossterm terminal dashboard. Displays a header with project name + elapsed time, a scrolling event list (newest first) with color-coded FILE/GIT/CMD badges, and a footer with event count + keybindings. Added `ratatui = "0.29"` and `crossterm = "0.28"` to Cargo.toml.
+
+2. **`finish` shell function** (`main.rs`): Both `SHELL_HOOK_ZSH` and `SHELL_HOOK_BASH` constants updated to include `finish() { resume stop "$@"; }` inside the hook fences. Running `finish` in the terminal now stops the session cleanly.
+
+3. **Watcher signal architecture** (`watcher.rs`): `watch()` signature changed to `watch(ui_tx: Option<UnboundedSender<SessionEvent>>, shutdown: Option<oneshot::Receiver<()>>)`. In TUI mode, the TUI owns a oneshot sender; when Ctrl-C is pressed in the TUI, it sends on the channel, causing the watcher to cleanly exit. This avoids a conflict where both the TUI and the watcher would compete to handle Ctrl-C. `log_git_diff` also accepts `ui_tx` and sends GitDiff events to the TUI. All daemon call sites pass `(None, None)`.
+
+4. **VS Code integration** (`.vscode/settings.json`, `.vscode/tasks.json`): Terminal font, size, and truecolor env vars configured for a clean TUI experience. Three VS Code tasks defined: `resume: start session`, `resume: show briefing`, `resume: status`.
+
+5. **`cargo build --release`** confirmed clean with zero warnings.
+
 ## Known Issues / Bugs
 
 - `reqwest 0.11` requires `openssl` on macOS; may need `brew install openssl` if build fails (using `rustls-tls` feature avoids this)
-- `cargo build` passes clean as of session 3
+- `cargo build` passes clean as of session 4
