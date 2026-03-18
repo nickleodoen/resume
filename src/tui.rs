@@ -1,11 +1,10 @@
 // Live terminal UI for resume sessions.
 //
 // Visual style mirrors Claude Code:
-//   - Large pixel-art title rendered with colored background cells (2-space pixels)
-//   - Small pixel mascot beside the info line
-//   - No box borders — clean output with a single separator line
+//   - Bordered welcome box with left (mascot + info) and right (tips) panels
+//   - Resy pixel mascot rendered with colored background cells (2-space pixels)
+//   - Command input area at the bottom with "> " prompt
 //   - RGB brand color: Color::Rgb(200, 120, 255) "Electric Orchid"
-//     (same role as Claude Code's salmon/coral, just in purple)
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -15,171 +14,84 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{List, ListItem, Paragraph},
+    widgets::{Block, Borders, Paragraph},
     Terminal,
 };
 use std::io;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
-use crate::session::{self, EventType, SessionEvent};
+use crate::session::{self, SessionEvent};
 use crate::watcher;
 
 // ── Brand palette ─────────────────────────────────────────────────────────────
-const BRAND: Color = Color::Rgb(200, 120, 255); // Electric Orchid — vivid light purple
-const BRAND_DIM: Color = Color::Rgb(110, 60, 160); // dim purple for separators
-const GRAY: Color = Color::Rgb(160, 160, 160); // secondary text
+const BRAND: Color = Color::Rgb(200, 120, 255); // Electric Orchid
+const BRAND_DIM: Color = Color::Rgb(110, 60, 160); // dim purple
+const GRAY: Color = Color::Rgb(160, 160, 160);
+const DARK_PX: Color = Color::Rgb(20, 20, 40); // eye
+const PURPLE_MAIN: Color = Color::Rgb(180, 100, 255);
+const PURPLE_LIGHT: Color = Color::Rgb(210, 150, 255);
+const PURPLE_DARK: Color = Color::Rgb(100, 50, 160);
 
-// ── Pixel font ────────────────────────────────────────────────────────────────
-// Each glyph: [row0..row6][col0..col4] — true = colored pixel (2 terminal cols wide)
-// RESUME uses 6 glyphs × 5 pixels × 2 cols + 5 gaps × 2 cols = 70 terminal cols.
-type Glyph = [[bool; 5]; 7];
-
-#[rustfmt::skip]
-const G_R: Glyph = [
-    [true,  true,  true,  true,  false],
-    [true,  false, false, false, true ],
-    [true,  false, false, false, true ],
-    [true,  true,  true,  true,  false],
-    [true,  false, true,  false, false],
-    [true,  false, false, true,  false],
-    [true,  false, false, false, true ],
-];
+// ── Resy pixel art ─────────────────────────────────────────────────────────────
+// 9 cols × 7 rows — white/blue winged creature (stingray-bird hybrid)
+// 0=transparent  1=white body  2=blue accent  3=dark eye
+// Each pixel = 2 terminal columns wide.
+const RESY_W: usize = 9;
+const RESY_H: usize = 7;
 
 #[rustfmt::skip]
-const G_E: Glyph = [
-    [true,  true,  true,  true,  true ],
-    [true,  false, false, false, false],
-    [true,  false, false, false, false],
-    [true,  true,  true,  true,  false],
-    [true,  false, false, false, false],
-    [true,  false, false, false, false],
-    [true,  true,  true,  true,  true ],
+const RESY: [[u8; RESY_W]; RESY_H] = [
+    [0, 0, 0, 1, 1, 0, 0, 0, 0], // dome top
+    [0, 0, 1, 2, 1, 1, 0, 0, 0], // dome + highlight
+    [0, 1, 3, 1, 1, 1, 1, 0, 0], // eye + dome sides
+    [0, 1, 1, 1, 1, 1, 1, 0, 0], // dome base
+    [0, 0, 1, 1, 1, 1, 0, 0, 0], // underside
+    [0, 0, 4, 0, 4, 0, 0, 0, 0], // tentacles row 1
+    [0, 0, 0, 4, 0, 0, 0, 0, 0], // tentacles row 2
 ];
 
-#[rustfmt::skip]
-const G_S: Glyph = [
-    [false, true,  true,  true,  true ],
-    [true,  false, false, false, false],
-    [true,  false, false, false, false],
-    [false, true,  true,  true,  false],
-    [false, false, false, false, true ],
-    [false, false, false, false, true ],
-    [true,  true,  true,  true,  false],
-];
-
-#[rustfmt::skip]
-const G_U: Glyph = [
-    [true,  false, false, false, true ],
-    [true,  false, false, false, true ],
-    [true,  false, false, false, true ],
-    [true,  false, false, false, true ],
-    [true,  false, false, false, true ],
-    [true,  false, false, false, true ],
-    [false, true,  true,  true,  false],
-];
-
-#[rustfmt::skip]
-const G_M: Glyph = [
-    [true,  false, false, false, true ],
-    [true,  true,  false, true,  true ],
-    [true,  false, true,  false, true ],
-    [true,  false, false, false, true ],
-    [true,  false, false, false, true ],
-    [true,  false, false, false, true ],
-    [true,  false, false, false, true ],
-];
-
-const RESUME_GLYPHS: &[&Glyph] = &[&G_R, &G_E, &G_S, &G_U, &G_M, &G_E];
-
-// ── Resy — pixel stingray mascot ─────────────────────────────────────────────
-// Top-down view: 6 pixels wide × 4 pixels tall, 2 terminal cols per pixel = 12 cols.
-// Slightly asymmetric (wider left wing pixel on row 1) = that unhinged energy.
-#[rustfmt::skip]
-const RESY: [[bool; 6]; 4] = [
-    [false, false, true,  true,  false, false], // head/dorsal
-    [true,  true,  true,  true,  true,  false], // wider left wing (unhinged asymmetry)
-    [false, true,  true,  true,  true,  false], // lower body
-    [false, false, true,  true,  false, false], // tail
-];
-
-// Render one row of the RESUME pixel-art banner.
-fn resume_row(row: usize, pixel_style: Style) -> Line<'static> {
-    let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")]; // left margin
-    for (gi, glyph) in RESUME_GLYPHS.iter().enumerate() {
-        for col in 0..5 {
-            if glyph[row][col] {
-                spans.push(Span::styled("  ", pixel_style));
-            } else {
-                spans.push(Span::raw("  "));
-            }
-        }
-        if gi < RESUME_GLYPHS.len() - 1 {
-            spans.push(Span::raw("  ")); // inter-letter gap
-        }
-    }
-    Line::from(spans)
-}
-
-// Build the 4 info rows: each row is [Resy pixel row] + [info text].
-fn info_lines(project: String, elapsed: String) -> Vec<Line<'static>> {
-    let pixel_on = Style::default().bg(BRAND);
-
-    let texts: [Vec<Span<'static>>; 4] = [
-        // Row 0: "resume  v0.1"
-        vec![
-            Span::styled("resume", Style::default().fg(BRAND).add_modifier(Modifier::BOLD)),
-            Span::raw("  "),
-            Span::styled("v0.1", Style::default().fg(GRAY)),
-        ],
-        // Row 1: project name
-        vec![Span::styled(
-            format!("{project}"),
-            Style::default().fg(GRAY),
-        )],
-        // Row 2: status + elapsed
-        vec![Span::styled(
-            format!("watching · {elapsed}"),
-            Style::default().fg(GRAY),
-        )],
-        // Row 3: empty (tail row)
-        vec![],
-    ];
-
-    texts
-        .into_iter()
-        .enumerate()
-        .map(|(i, text_spans)| {
-            let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")]; // left margin
-
-            // Resy pixel row (6 pixels × 2 cols = 12 terminal cols)
-            for col in 0..6 {
-                if RESY[i][col] {
-                    spans.push(Span::styled("  ", pixel_on));
-                } else {
-                    spans.push(Span::raw("  "));
-                }
-            }
-
-            spans.push(Span::raw("  ")); // gap between mascot and text
-            spans.extend(text_spans);
+fn resy_lines() -> Vec<Line<'static>> {
+    (0..RESY_H)
+        .map(|row| {
+            let spans: Vec<Span<'static>> = RESY[row]
+                .iter()
+                .map(|&px| match px {
+                    1 => Span::styled("  ", Style::default().bg(PURPLE_MAIN)),
+                    2 => Span::styled("  ", Style::default().bg(PURPLE_LIGHT)),
+                    3 => Span::styled("  ", Style::default().bg(DARK_PX)),
+                    4 => Span::styled("  ", Style::default().bg(PURPLE_DARK)),
+                    _ => Span::raw("  "),
+                })
+                .collect();
             Line::from(spans)
         })
         .collect()
 }
 
+// ── App state ─────────────────────────────────────────────────────────────────
 struct App {
     events: Vec<SessionEvent>,
     project: String,
     started: Instant,
+    input: String,
+    show_requested: bool,
+    message: Option<String>,
 }
 
 impl App {
     fn new(project: String) -> Self {
-        Self { events: Vec::new(), project, started: Instant::now() }
+        Self {
+            events: Vec::new(),
+            project,
+            started: Instant::now(),
+            input: String::new(),
+            show_requested: false,
+            message: None,
+        }
     }
 
     fn push(&mut self, ev: SessionEvent) {
@@ -191,10 +103,33 @@ impl App {
         let h = secs / 3600;
         let m = (secs % 3600) / 60;
         let s = secs % 60;
-        if h > 0 { format!("{h:02}:{m:02}:{s:02}") } else { format!("{m:02}:{s:02}") }
+        if h > 0 {
+            format!("{h:02}:{m:02}:{s:02}")
+        } else {
+            format!("{m:02}:{s:02}")
+        }
+    }
+
+    /// Process the current input buffer. Returns true if the TUI should exit.
+    fn handle_command(&mut self) -> bool {
+        let cmd = self.input.trim().to_lowercase();
+        self.input.clear();
+        match cmd.as_str() {
+            "show" => {
+                self.show_requested = true;
+                true
+            }
+            "finish" | "quit" | "exit" => true,
+            "" => false,
+            _ => {
+                self.message = Some("Unknown command — try `show` or `finish`".to_string());
+                false
+            }
+        }
     }
 }
 
+// ── Public entry point ────────────────────────────────────────────────────────
 pub async fn run() -> Result<()> {
     session::init()?;
 
@@ -228,20 +163,30 @@ pub async fn run() -> Result<()> {
     terminal.show_cursor().ok();
 
     result?;
-    println!(
-        "Session ended  ·  {} event(s) recorded  ·  run `resume show` for a briefing.",
-        session::load().map(|s| s.events.len()).unwrap_or(0)
-    );
+
+    if app.show_requested {
+        println!("Generating briefing...");
+        let sess = session::load()?;
+        let briefing = crate::summarize::generate(&sess).await?;
+        println!("{}", briefing);
+    } else {
+        let count = session::load().map(|s| s.events.len()).unwrap_or(0);
+        println!(
+            "Session ended  ·  {count} event(s) recorded  ·  run `resume show` for a briefing."
+        );
+    }
+
     Ok(())
 }
 
+// ── Event loop ────────────────────────────────────────────────────────────────
 async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     rx: &mut mpsc::UnboundedReceiver<SessionEvent>,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
 ) -> Result<()> {
-    let tick = Duration::from_millis(250);
+    let tick = Duration::from_millis(50);
     loop {
         terminal.draw(|f| render(f, app))?;
 
@@ -255,11 +200,28 @@ async fn run_loop(
             _ = tokio::time::sleep(tick) => {
                 while event::poll(Duration::ZERO).unwrap_or(false) {
                     if let Ok(CEvent::Key(key)) = event::read() {
-                        if key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)
-                        {
-                            let _ = shutdown_tx.send(());
-                            return Ok(());
+                        match key.code {
+                            KeyCode::Char('c')
+                                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                            {
+                                let _ = shutdown_tx.send(());
+                                return Ok(());
+                            }
+                            KeyCode::Enter => {
+                                if app.handle_command() {
+                                    let _ = shutdown_tx.send(());
+                                    return Ok(());
+                                }
+                            }
+                            KeyCode::Char(c) => {
+                                app.input.push(c);
+                                app.message = None;
+                            }
+                            KeyCode::Backspace => {
+                                app.input.pop();
+                                app.message = None;
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -269,85 +231,175 @@ async fn run_loop(
     Ok(())
 }
 
+// ── Rendering ─────────────────────────────────────────────────────────────────
 fn render(f: &mut ratatui::Frame, app: &App) {
     let area = f.area();
 
-    // Layout (no box borders — clean like Claude Code):
-    //   banner : 7 pixel art rows + 1 blank + 4 info rows = 12
-    //   sep    : 1 (horizontal rule)
-    //   events : fill
-    //   footer : 1
+    // Layout:
+    //   welcome box  : RESY_H + 5 inner rows + 2 border = 14 rows
+    //   spacer       : 1
+    //   input line   : 1
+    //   separator    : 1
+    //   footer/hint  : 1
+    let box_height = (RESY_H as u16) + 5 + 2; // inner content + borders
     let chunks = Layout::vertical([
-        Constraint::Length(12),
-        Constraint::Length(1),
-        Constraint::Min(3),
-        Constraint::Length(1),
+        Constraint::Length(box_height),
+        Constraint::Length(1), // spacer
+        Constraint::Length(1), // "> " input
+        Constraint::Length(1), // separator
+        Constraint::Length(1), // hint / error message
+        Constraint::Min(0),
     ])
     .split(area);
 
-    // ── Banner ────────────────────────────────────────────────────────────────
-    let pixel_on = Style::default().bg(BRAND);
-    let mut banner: Vec<Line> = (0..7).map(|r| resume_row(r, pixel_on)).collect();
-    banner.push(Line::raw("")); // blank row between art and info
-    banner.extend(info_lines(app.project.clone(), app.elapsed()));
+    // ── Welcome box ───────────────────────────────────────────────────────────
+    let box_block = Block::default()
+        .title(Span::styled(
+            "─ Resume ",
+            Style::default().fg(BRAND).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BRAND));
 
-    f.render_widget(Paragraph::new(banner), chunks[0]);
+    let inner = box_block.inner(chunks[0]);
+    f.render_widget(box_block, chunks[0]);
 
-    // ── Separator ─────────────────────────────────────────────────────────────
-    let sep = "─".repeat(area.width as usize);
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(sep, Style::default().fg(BRAND_DIM)))),
-        chunks[1],
-    );
+    // Split inner area: left (mascot + info) | right (tips)
+    let panels = Layout::horizontal([
+        Constraint::Length(40), // left panel: wide enough for full path
+        Constraint::Min(0),     // right panel: tips
+    ])
+    .split(inner);
 
-    // ── Event list ────────────────────────────────────────────────────────────
-    let items: Vec<ListItem> = app
-        .events
-        .iter()
-        .rev()
-        .map(|ev| {
-            let (tag, tag_color) = match ev.event_type {
-                EventType::FileChange => ("FILE", Color::Cyan),
-                EventType::GitDiff => ("GIT ", Color::Yellow),
-                EventType::Command => ("CMD ", Color::Green),
-            };
-            let time_str = ev.timestamp.format("%H:%M:%S").to_string();
-            let content = ev.content.lines().next().unwrap_or("").to_string();
-            let display = if content.len() > 42 {
-                format!("{}~", &content[..41])
-            } else {
-                content
-            };
-            ListItem::new(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(tag, Style::default().fg(tag_color).add_modifier(Modifier::BOLD)),
-                Span::raw("  "),
-                Span::styled(display, Style::default().fg(Color::White)),
-                Span::styled(
-                    format!("  {time_str}"),
-                    Style::default().fg(GRAY),
-                ),
-            ]))
-        })
-        .collect();
+    render_left(f, app, panels[0]);
+    render_right(f, app, panels[1]);
 
-    f.render_widget(List::new(items), chunks[2]);
-
-    // ── Footer ────────────────────────────────────────────────────────────────
-    let count = app.events.len();
+    // ── Input line ────────────────────────────────────────────────────────────
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                format!("{count} event{}", if count == 1 { "" } else { "s" }),
-                Style::default().fg(BRAND),
-            ),
-            Span::styled("  ·  ", Style::default().fg(BRAND_DIM)),
-            Span::styled("Ctrl-C", Style::default().fg(BRAND).add_modifier(Modifier::BOLD)),
-            Span::styled(" or ", Style::default().fg(GRAY)),
-            Span::styled("finish", Style::default().fg(BRAND).add_modifier(Modifier::BOLD)),
-            Span::styled(" to stop", Style::default().fg(GRAY)),
+            Span::styled("> ", Style::default().fg(Color::White)),
+            Span::styled(app.input.clone(), Style::default().fg(Color::White)),
+            Span::styled("█", Style::default().fg(Color::White)),
         ])),
+        chunks[2],
+    );
+
+    // ── Separator ─────────────────────────────────────────────────────────────
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "─".repeat(area.width as usize),
+            Style::default().fg(BRAND_DIM),
+        ))),
         chunks[3],
     );
+
+    // ── Footer / hint ─────────────────────────────────────────────────────────
+    if let Some(msg) = &app.message {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(msg.clone(), Style::default().fg(GRAY)),
+            ])),
+            chunks[4],
+        );
+    }
+}
+
+fn render_left(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let mut lines: Vec<Line> = Vec::new();
+
+    // "Welcome" bold
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            "Welcome",
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::raw(""));
+
+    // Resy pixel art (2-col left margin + 18 cols of art)
+    for row in resy_lines() {
+        let mut spans = vec![Span::raw("  ")];
+        spans.extend(row.spans);
+        lines.push(Line::from(spans));
+    }
+
+    lines.push(Line::raw(""));
+
+    // "resume  ·  elapsed"
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("resume", Style::default().fg(BRAND).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("  ·  {}", app.elapsed()), Style::default().fg(GRAY)),
+    ]));
+
+    // Current directory, home-dir abbreviated
+    let cwd_display = std::env::current_dir()
+        .ok()
+        .and_then(|p| {
+            dirs::home_dir().and_then(|h| {
+                p.strip_prefix(&h)
+                    .ok()
+                    .map(|rel| format!("~/{}", rel.display()))
+            })
+        })
+        .unwrap_or_else(|| app.project.clone());
+    // Truncate only if truly overflowing the panel
+    let max_path = (area.width.saturating_sub(2)) as usize;
+    let cwd_display = if cwd_display.len() > max_path && max_path > 3 {
+        format!("{}...", &cwd_display[..max_path - 3])
+    } else {
+        cwd_display
+    };
+
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(cwd_display, Style::default().fg(GRAY)),
+    ]));
+
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_right(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    // Left border acts as the panel divider
+    let block = Block::default()
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(GRAY));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let count = app.events.len();
+    let elapsed = app.elapsed();
+    let sep_width = inner.width.saturating_sub(1) as usize;
+
+    let lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            "Tips for getting started",
+            Style::default().fg(BRAND).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "─".repeat(sep_width),
+            Style::default().fg(BRAND_DIM),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("finish", Style::default().fg(BRAND).add_modifier(Modifier::BOLD)),
+            Span::styled("  or Ctrl-C to stop recording", Style::default().fg(GRAY)),
+        ]),
+        Line::from(vec![
+            Span::styled("show", Style::default().fg(BRAND).add_modifier(Modifier::BOLD)),
+            Span::styled("    to get a briefing on this session", Style::default().fg(GRAY)),
+        ]),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled(
+                format!("{count} event{}", if count == 1 { "" } else { "s" }),
+                Style::default().fg(GRAY),
+            ),
+            Span::styled(format!("  ·  {elapsed}"), Style::default().fg(BRAND_DIM)),
+        ]),
+    ];
+
+    f.render_widget(Paragraph::new(lines), inner);
 }
