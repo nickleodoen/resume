@@ -49,10 +49,41 @@ impl Session {
     }
 }
 
-fn session_path() -> Result<PathBuf> {
+fn resume_dir() -> Result<PathBuf> {
     let dir = PathBuf::from(".resume");
     fs::create_dir_all(&dir).context("failed to create .resume directory")?;
-    Ok(dir.join("session.json"))
+    Ok(dir)
+}
+
+fn session_path() -> Result<PathBuf> {
+    Ok(resume_dir()?.join("session.json"))
+}
+
+fn pid_path() -> Result<PathBuf> {
+    Ok(resume_dir()?.join("resume.pid"))
+}
+
+pub fn write_pid(pid: u32) -> Result<()> {
+    fs::write(pid_path()?, pid.to_string()).context("failed to write PID file")?;
+    Ok(())
+}
+
+pub fn read_pid() -> Result<Option<u32>> {
+    let path = pid_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&path).context("failed to read PID file")?;
+    let pid: u32 = raw.trim().parse().context("PID file contains invalid data")?;
+    Ok(Some(pid))
+}
+
+pub fn clear_pid() -> Result<()> {
+    let path = pid_path()?;
+    if path.exists() {
+        fs::remove_file(path).context("failed to remove PID file")?;
+    }
+    Ok(())
 }
 
 /// Create a fresh session for the current directory. Overwrites any existing session.

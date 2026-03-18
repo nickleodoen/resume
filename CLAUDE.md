@@ -65,19 +65,31 @@ resume status
 - `git.rs` — git2 diff capture (HEAD → workdir)
 - `summarize.rs` — Anthropic Messages API call using `claude-opus-4-6`
 
+## What Was Built — Session 2 (2026-03-18)
+
+- Wired `git::current_diff()` into the watcher loop in `watcher.rs`
+  - Every `GIT_DIFF_INTERVAL` (5) file changes, a `GitDiff` event is captured and appended
+  - Deduplication: identical consecutive diffs are skipped via `last_diff` comparison
+  - Empty diffs are skipped (no uncommitted changes)
+  - `log_git_diff()` helper extracted for clarity
+- Background daemon mode (`resume start` no longer blocks):
+  - `resume start` re-execs itself with a hidden `--daemon` flag via `spawn_daemon()`
+  - Child process is placed in its own process group (`process_group(0)`) so Ctrl-C doesn't kill it
+  - PID written to `.resume/resume.pid`; read/write/clear helpers in `session.rs`
+  - `resume start` checks for a stale/live PID file and bails with a clear error if already running
+  - `resume stop` reads the PID, sends SIGTERM via `kill`, clears the PID file, then prints the session summary
+  - No new dependencies — uses `kill` via `std::process::Command`
+- `cargo build` confirmed clean
+
 ## In Progress / Unfinished
 
-- `git.rs` is implemented but not yet wired into the watcher loop (next step)
 - No shell command capture yet (planned: hook into zsh via PROMPT_COMMAND or a wrapper)
-- No background daemon mode — `resume start` currently blocks the terminal
 
 ## Next Steps (Priority Order)
 
-1. Wire `git::current_diff()` into the watcher loop — capture diffs periodically alongside file events
-2. Add background daemon mode: write a PID file, detach with `nohup` or a proper daemonize approach
-3. Shell command capture — document zsh hook or write a wrapper script
-4. Add `.resume/session.json` to `.gitignore` template
-5. Write `resume init` subcommand that adds the .gitignore entry automatically
+1. Shell command capture — zsh hook (PROMPT_COMMAND / precmd) or wrapper script
+2. Add `.resume/session.json` and `.resume/resume.pid` to `.gitignore` template
+3. Write `resume init` subcommand that adds the .gitignore entries automatically
 
 ## Key Decisions
 
@@ -91,5 +103,5 @@ resume status
 
 ## Known Issues / Bugs
 
-- None confirmed yet — needs a `cargo build` and manual test run
 - `reqwest 0.11` requires `openssl` on macOS; may need `brew install openssl` if build fails
+- `cargo build` passes clean as of session 2
