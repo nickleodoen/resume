@@ -81,15 +81,38 @@ resume status
   - No new dependencies — uses `kill` via `std::process::Command`
 - `cargo build` confirmed clean
 
+- Shell command capture + `resume init` (session 2, continued):
+  - Hidden `resume log-command <cmd>` subcommand appends `Command` events; no-op if no session active
+  - `resume init` adds `.resume/` to `.gitignore` (idempotent) and prints the zsh hook snippet
+  - `resume init --install-hook` auto-appends the hook to `~/.zshrc` (idempotent via sentinel comment)
+  - Uses `dirs::home_dir()` to locate `~/.zshrc` cross-platform
+  - zsh hook uses `preexec_functions` and `&!` (disown) so it never blocks the shell
+
+## Packaging Intent (important — read before distributing)
+
+When this tool is packaged (Homebrew formula, cargo-install, installer script, etc.), the shell hook
+setup **must be surfaced prominently** to non-technical users. The hook is what makes `resume show`
+actually useful — without it, the session only contains file events, not the commands that caused them.
+
+**Recommended packaging approach:**
+- Post-install message should say: *"Run `resume init --install-hook` to finish setup, then open a new terminal."*
+- Homebrew caveats block is the right place for this on macOS
+- Any install script (curl | sh style) should offer to run `resume init --install-hook` automatically as a final step
+- Do NOT silently modify `~/.zshrc` without the user running `resume init --install-hook` themselves
+
+The `--install-hook` flag is already implemented and idempotent (safe to re-run). It uses a sentinel
+comment (`# --- resume shell hook ---`) to detect existing installs.
+
 ## In Progress / Unfinished
 
-- No shell command capture yet (planned: hook into zsh via PROMPT_COMMAND or a wrapper)
+- No bash hook yet (only zsh `preexec_functions` is supported); bash users need `trap DEBUG`
+- Shell hook requires a new terminal or `source ~/.zshrc` after install
 
 ## Next Steps (Priority Order)
 
-1. Shell command capture — zsh hook (PROMPT_COMMAND / precmd) or wrapper script
-2. Add `.resume/session.json` and `.resume/resume.pid` to `.gitignore` template
-3. Write `resume init` subcommand that adds the .gitignore entries automatically
+1. End-to-end test: `cargo build --release`, `resume init --install-hook`, `resume start`, do work, `resume show`
+2. Add bash hook support in `resume init --install-hook` (detect `$SHELL`, write to `~/.bashrc`)
+3. Throttle/deduplicate noisy file events (editor autosave fires many events per second)
 
 ## Key Decisions
 

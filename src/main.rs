@@ -18,6 +18,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Initialize resume for this project (adds .gitignore entries + shell hook)
+    Init {
+        /// Automatically install the shell hook into ~/.zshrc (no manual copy-paste needed)
+        #[arg(long)]
+        install_hook: bool,
+    },
     /// Begin a session and watch for file/git changes in the background
     Start {
         /// Run the watcher in the foreground (internal — used by daemon re-exec)
@@ -30,6 +36,11 @@ enum Command {
     Show,
     /// Show what has been captured so far this session
     Status,
+    /// Append a shell command to the session log (called by the shell hook)
+    #[command(hide = true)]
+    LogCommand {
+        cmd: String,
+    },
 }
 
 #[tokio::main]
@@ -37,6 +48,13 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Init { install_hook } => {
+            init_project(install_hook)?;
+        }
+        Command::LogCommand { cmd } => {
+            // Silent — called by the shell hook in a background job.
+            session::log_command(&cmd)?;
+        }
         Command::Start { daemon: true } => {
             // Running as the background daemon — do the actual work.
             watcher::watch().await?;
@@ -129,4 +147,74 @@ fn kill_process(pid: u32) {
     let _ = std::process::Command::new("kill")
         .args([&pid.to_string()])
         .status();
+}
+
+const GITIGNORE_ENTRIES: &str = "\n# resume session files\n.resume/\n";
+
+// Sentinel used to detect whether the hook is already installed.
+const ZSH_HOOK_SENTINEL: &str = "# --- resume shell hook ---";
+
+const ZSH_HOOK: &str = "\
+# --- resume shell hook ---\n\
+_resume_preexec() {\n\
+    [[ -f .resume/session.json ]] || return\n\
+    resume log-command \"$1\" 2>/dev/null &!\n\
+}\n\
+preexec_functions+=(_resume_preexec)\n\
+# --- end resume shell hook ---\n";
+
+fn init_project(install_hook: bool) -> Result<()> {
+    // 1. Add .resume/ to .gitignore if not already present.
+    let gitignore_path = std::path::Path::new(".gitignore");
+    let existing = if gitignore_path.exists() {
+        std::fs::read_to_string(gitignore_path).context("failed to read .gitignore")?
+    } else {
+        String::new()
+    };
+
+    if existing.contains(".resume/") {
+        println!(".gitignore already contains .resume/ — skipping.");
+    } else {
+        let mut content = existing;
+        content.push_str(GITIGNORE_ENTRIES);
+        std::fs::write(gitignore_path, &content).context("failed to write .gitignore")?;
+        println!("Added .resume/ to .gitignore.");
+    }
+
+    // 2. Shell hook — auto-install or print for manual setup.
+    if install_hook {
+        install_zsh_hook()?;
+    } else {
+        println!("\nTo capture shell commands, add this to your ~/.zshrc:\n");
+        println!("{ZSH_HOOK}");
+        println!("Or run `resume init --install-hook` to do it automatically.");
+    }
+
+    Ok(())
+}
+
+fn install_zsh_hook() -> Result<()> {
+    let zshrc_path = dirs::home_dir()
+        .context("could not find home directory")?
+        .join(".zshrc");
+
+    let existing = if zshrc_path.exists() {
+        std::fs::read_to_string(&zshrc_path).context("failed to read ~/.zshrc")?
+    } else {
+        String::new()
+    };
+
+    if existing.contains(ZSH_HOOK_SENTINEL) {
+        println!("Shell hook already present in ~/.zshrc — skipping.");
+        return Ok(());
+    }
+
+    let mut content = existing;
+    content.push('\n');
+    content.push_str(ZSH_HOOK);
+    std::fs::write(&zshrc_path, content).context("failed to write ~/.zshrc")?;
+
+    println!("Shell hook installed in ~/.zshrc.");
+    println!("Run `source ~/.zshrc` (or open a new terminal) to activate it.");
+    Ok(())
 }

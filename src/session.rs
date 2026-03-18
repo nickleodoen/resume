@@ -132,6 +132,15 @@ pub fn close() -> Result<()> {
     Ok(())
 }
 
+/// Append a shell command event. No-op (silent) if no session is active.
+pub fn log_command(cmd: &str) -> Result<()> {
+    if !PathBuf::from(".resume/session.json").exists() {
+        return Ok(());
+    }
+    let event = SessionEvent::new(EventType::Command, cmd);
+    append_event(event)
+}
+
 /// Print a human-readable summary of captured events.
 pub fn print_status(sess: &Session) {
     println!("Project: {}", sess.project);
