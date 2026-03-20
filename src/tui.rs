@@ -37,21 +37,22 @@ const PURPLE_LIGHT: Color = Color::Rgb(210, 150, 255);
 const PURPLE_DARK: Color = Color::Rgb(100, 50, 160);
 
 // ── Resy pixel art ─────────────────────────────────────────────────────────────
-// 9 cols × 7 rows — white/blue winged creature (stingray-bird hybrid)
-// 0=transparent  1=white body  2=blue accent  3=dark eye
-// Each pixel = 2 terminal columns wide.
+// 9 cols × 7 rows — purple jellyfish mascot
+// 0=transparent  1=PURPLE_MAIN (body)  2=PURPLE_LIGHT (highlight)
+//                3=DARK_PX (eyes)      4=PURPLE_DARK (fringe/tentacles)
+// Each pixel = 2 terminal columns wide (≈ square pixels).
 const RESY_W: usize = 9;
 const RESY_H: usize = 7;
 
 #[rustfmt::skip]
 const RESY: [[u8; RESY_W]; RESY_H] = [
-    [0, 0, 0, 1, 1, 0, 0, 0, 0], // dome top
-    [0, 0, 1, 2, 1, 1, 0, 0, 0], // dome + highlight
-    [0, 1, 3, 1, 1, 1, 1, 0, 0], // eye + dome sides
-    [0, 1, 1, 1, 1, 1, 1, 0, 0], // dome base
-    [0, 0, 1, 1, 1, 1, 0, 0, 0], // underside
-    [0, 0, 4, 0, 4, 0, 0, 0, 0], // tentacles row 1
-    [0, 0, 0, 4, 0, 0, 0, 0, 0], // tentacles row 2
+    [0, 0, 1, 1, 1, 1, 1, 0, 0], // dome arc top       (5 wide)
+    [0, 1, 2, 1, 1, 1, 1, 1, 0], // dome + highlight   (7 wide)
+    [1, 1, 1, 3, 1, 3, 1, 1, 1], // full dome + 2 eyes (symmetric)
+    [1, 1, 1, 1, 1, 1, 1, 1, 1], // dome base flat     (9 wide)
+    [0, 4, 1, 4, 1, 4, 1, 4, 0], // fringe/ruffle row  (jellyfish!)
+    [0, 0, 4, 0, 4, 0, 4, 0, 0], // three tentacles
+    [0, 0, 4, 0, 0, 0, 4, 0, 0], // outer tentacles taper
 ];
 
 fn resy_lines() -> Vec<Line<'static>> {
@@ -245,8 +246,9 @@ fn render(f: &mut ratatui::Frame, app: &App) {
     let chunks = Layout::vertical([
         Constraint::Length(box_height),
         Constraint::Length(1), // spacer
+        Constraint::Length(1), // separator above input
         Constraint::Length(1), // "> " input
-        Constraint::Length(1), // separator
+        Constraint::Length(1), // separator below input
         Constraint::Length(1), // hint / error message
         Constraint::Min(0),
     ])
@@ -266,13 +268,22 @@ fn render(f: &mut ratatui::Frame, app: &App) {
 
     // Split inner area: left (mascot + info) | right (tips)
     let panels = Layout::horizontal([
-        Constraint::Length(40), // left panel: wide enough for full path
+        Constraint::Length(30), // left panel: mascot + info
         Constraint::Min(0),     // right panel: tips
     ])
     .split(inner);
 
     render_left(f, app, panels[0]);
     render_right(f, app, panels[1]);
+
+    // ── Separator above input ────────────────────────────────────────────────
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "─".repeat(area.width as usize),
+            Style::default().fg(Color::White),
+        ))),
+        chunks[2],
+    );
 
     // ── Input line ────────────────────────────────────────────────────────────
     f.render_widget(
@@ -281,16 +292,16 @@ fn render(f: &mut ratatui::Frame, app: &App) {
             Span::styled(app.input.clone(), Style::default().fg(Color::White)),
             Span::styled("█", Style::default().fg(Color::White)),
         ])),
-        chunks[2],
+        chunks[3],
     );
 
-    // ── Separator ─────────────────────────────────────────────────────────────
+    // ── Separator below input ────────────────────────────────────────────────
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "─".repeat(area.width as usize),
-            Style::default().fg(BRAND_DIM),
+            Style::default().fg(Color::White),
         ))),
-        chunks[3],
+        chunks[4],
     );
 
     // ── Footer / hint ─────────────────────────────────────────────────────────
@@ -300,7 +311,7 @@ fn render(f: &mut ratatui::Frame, app: &App) {
                 Span::raw("  "),
                 Span::styled(msg.clone(), Style::default().fg(GRAY)),
             ])),
-            chunks[4],
+            chunks[5],
         );
     }
 }
@@ -318,9 +329,9 @@ fn render_left(f: &mut ratatui::Frame, app: &App, area: Rect) {
     ]));
     lines.push(Line::raw(""));
 
-    // Resy pixel art (2-col left margin + 18 cols of art)
+    // Resy pixel art (6-col left margin + 18 cols of art)
     for row in resy_lines() {
-        let mut spans = vec![Span::raw("  ")];
+        let mut spans = vec![Span::raw("      ")];
         spans.extend(row.spans);
         lines.push(Line::from(spans));
     }
