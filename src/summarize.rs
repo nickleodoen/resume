@@ -5,6 +5,7 @@ use anyhow::{bail, Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+use crate::git;
 use crate::session::{EventType, Session};
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -34,7 +35,7 @@ struct ContentBlock {
     text: String,
 }
 
-fn build_prompt(sess: &Session) -> String {
+fn build_prompt(sess: &Session, current_diff: Option<String>) -> String {
     let mut lines = Vec::new();
     lines.push(format!("Project: {}", sess.project));
     lines.push(format!(
@@ -44,18 +45,59 @@ fn build_prompt(sess: &Session) -> String {
     lines.push(format!("Total events: {}", sess.events.len()));
     lines.push(String::new());
 
-    for event in &sess.events {
-        let kind = match event.event_type {
-            EventType::FileChange => "File changed",
-            EventType::GitDiff => "Git diff",
-            EventType::Command => "Command run",
-        };
-        lines.push(format!(
-            "[{}] {}: {}",
-            event.timestamp.format("%H:%M:%S"),
-            kind,
-            event.content
-        ));
+    // Group events by type for cleaner signal
+    let commands: Vec<_> = sess
+        .events
+        .iter()
+        .filter(|e| matches!(e.event_type, EventType::Command))
+        .collect();
+    let file_changes: Vec<_> = sess
+        .events
+        .iter()
+        .filter(|e| matches!(e.event_type, EventType::FileChange))
+        .collect();
+    let diffs: Vec<_> = sess
+        .events
+        .iter()
+        .filter(|e| matches!(e.event_type, EventType::GitDiff))
+        .collect();
+
+    if !commands.is_empty() {
+        lines.push("=== Shell commands (chronological) ===".to_string());
+        for ev in &commands {
+            lines.push(format!("  [{}] {}", ev.timestamp.format("%H:%M:%S"), ev.content));
+        }
+        lines.push(String::new());
+    }
+
+    if !file_changes.is_empty() {
+        lines.push("=== Files touched ===".to_string());
+        // Deduplicate file names for brevity
+        let mut seen = std::collections::HashSet::new();
+        for ev in &file_changes {
+            if seen.insert(&ev.content) {
+                lines.push(format!("  {}", ev.content));
+            }
+        }
+        lines.push(String::new());
+    }
+
+    // Commits recorded during the session
+    if !diffs.is_empty() {
+        lines.push("=== Commits made this session ===".to_string());
+        for ev in &diffs {
+            lines.push(format!("  {}", ev.content));
+        }
+        lines.push(String::new());
+    }
+
+    // Current git diff captured fresh at briefing time (independent of live feed)
+    if let Some(diff) = current_diff {
+        if !diff.is_empty() {
+            lines.push("=== Current uncommitted changes (git diff) ===".to_string());
+            lines.push(diff);
+            lines.push(String::new());
+        }
     }
 
     lines.join("\n")
@@ -67,20 +109,32 @@ pub async fn generate(sess: &Session) -> Result<String> {
         .context("ANTHROPIC_API_KEY environment variable not set")?;
 
     if sess.events.is_empty() {
-        return Ok("No events recorded yet. Start a session with `resume start` and do some work first.".to_string());
+        return Ok("No events recorded yet. Run `resume` to start a session and do some work first.".to_string());
     }
 
-    let prompt = build_prompt(sess);
+    // Capture current diff fresh — completely separate from the live feed.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let current_diff = git::current_diff(&cwd).ok().filter(|d| !d.is_empty());
+
+    let prompt = build_prompt(sess, current_diff);
 
     let request = ApiRequest {
         model: MODEL.to_string(),
-        max_tokens: 1024,
-        system: "You are a developer assistant. Given a log of file changes and git diffs from a \
-coding session, produce a concise briefing (3-6 sentences) that explains: \
-(1) what the developer was working on, \
-(2) where they left off or got stuck, \
-(3) the most likely next step. \
-Be concrete and specific. Refer to actual file names and concepts from the log."
+        max_tokens: 2048,
+        system: "You are an expert developer assistant helping engineers pick up where they left off.\n\
+Given a session log of shell commands, file changes, and git diffs, produce a structured briefing \
+with exactly these four sections:\n\n\
+**What I was working on**\n\
+One or two sentences naming the feature, bug, or task. Be specific — use actual file names and \
+function/component names from the log.\n\n\
+**Progress made**\n\
+Bullet points (2–4) of concrete things that were completed or changed this session.\n\n\
+**Where I left off**\n\
+One sentence describing the exact state of things at the end of the session — what was in flight, \
+what was broken, or what was about to happen next.\n\n\
+**Recommended next step**\n\
+One actionable sentence telling the developer exactly what to do first when they sit back down.\n\n\
+Rules: be concrete, use real names from the log, skip generic filler, keep total output under 200 words."
             .to_string(),
         messages: vec![Message {
             role: "user".to_string(),

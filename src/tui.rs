@@ -314,6 +314,70 @@ fn render(f: &mut ratatui::Frame, app: &App) {
             chunks[5],
         );
     }
+    
+
+    // ── Live event feed ───────────────────────────────────────────────────────
+    // Shows: commits (most recent first) then unique files touched.
+    // Commands and raw diffs are intentionally hidden — keep it human-readable.
+    let feed_area = chunks[6];
+    if feed_area.height == 0 {
+        return;
+    }
+    let max_w = (feed_area.width.saturating_sub(6)) as usize;
+
+    // Collect commits (GitDiff events now store commit messages).
+    let commits: Vec<Line> = app
+        .events
+        .iter()
+        .rev()
+        .filter(|e| matches!(e.event_type, crate::session::EventType::GitDiff))
+        .map(|e| {
+            let msg = e.content.lines().next().unwrap_or("").to_string();
+            let msg = if msg.len() > max_w && max_w > 3 { format!("{}…", &msg[..max_w - 1]) } else { msg };
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("↑ ", Style::default().fg(BRAND).add_modifier(Modifier::BOLD)),
+                Span::styled(msg, Style::default().fg(Color::White)),
+            ])
+        })
+        .collect();
+
+    // Collect unique file names touched (deduplicated, preserve recency order).
+    let mut seen_files = std::collections::HashSet::new();
+    let files: Vec<Line> = app
+        .events
+        .iter()
+        .rev()
+        .filter(|e| matches!(e.event_type, crate::session::EventType::FileChange))
+        .filter(|e| seen_files.insert(e.content.clone()))
+        .map(|e| {
+            let path = if e.content.len() > max_w && max_w > 3 {
+                format!("{}…", &e.content[..max_w - 1])
+            } else {
+                e.content.clone()
+            };
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("  ", Style::default().fg(GRAY)),
+                Span::styled(path, Style::default().fg(GRAY)),
+            ])
+        })
+        .collect();
+
+    let mut feed: Vec<Line> = Vec::new();
+    if commits.is_empty() && files.is_empty() {
+        feed.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Watching for changes…", Style::default().fg(BRAND_DIM)),
+        ]));
+    } else {
+        feed.extend(commits);
+        if !files.is_empty() {
+            feed.push(Line::raw(""));
+            feed.extend(files);
+        }
+    }
+    f.render_widget(Paragraph::new(feed), feed_area);
 }
 
 fn render_left(f: &mut ratatui::Frame, app: &App, area: Rect) {

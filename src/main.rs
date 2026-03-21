@@ -23,7 +23,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// End the current session and print a summary
+    /// End the current session
     Finish,
     /// Set up resume for this project (adds .gitignore entries + shell hook)
     New {
@@ -43,7 +43,7 @@ enum Command {
     Stop,
     /// Get an AI briefing on what you were working on
     Show,
-    /// Show what has been captured so far this session
+    /// Print a raw list of all captured events this session
     Status,
     /// Append a shell command to the session log (called by the shell hook)
     #[command(hide = true)]
@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
         Some(Command::Status) => {
             match session::load() {
                 Ok(sess) => session::print_status(&sess),
-                Err(_) => println!("No session found. Run `resume start` to begin."),
+                Err(_) => println!("No session found. Run `resume` to begin."),
             }
         }
     }

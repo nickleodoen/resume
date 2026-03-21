@@ -1,6 +1,6 @@
 // File system watcher using the `notify` crate. Watches the current directory
 // recursively and logs FileChange events to the session. Skips noise directories.
-// Every GIT_DIFF_INTERVAL distinct file changes, also captures a git diff snapshot.
+// On each file change, checks if HEAD moved and logs the new commit message.
 // Duplicate events for the same path within DEBOUNCE_SECS are suppressed.
 
 use anyhow::{Context, Result};
@@ -15,13 +15,8 @@ use tokio::sync::oneshot;
 use crate::git;
 use crate::session::{append_event, EventType, SessionEvent};
 
-const GIT_DIFF_INTERVAL: u32 = 5;
-
 /// Suppress duplicate events for the same path within this window.
 const DEBOUNCE_SECS: u64 = 2;
-
-/// Maximum bytes to store for a single git diff snapshot.
-const MAX_DIFF_BYTES: usize = 8_000;
 
 const IGNORED_DIRS: &[&str] = &[".git", "target", "node_modules", ".resume"];
 
@@ -52,20 +47,6 @@ fn is_filtered(path: &Path) -> bool {
     is_ignored_dir(path) || is_noise_file(path)
 }
 
-/// Truncate a diff to at most `max` bytes, appending a note if truncated.
-fn truncate_diff(diff: String, max: usize) -> String {
-    if diff.len() <= max {
-        return diff;
-    }
-    let total = diff.len();
-    // Truncate at a UTF-8 boundary.
-    let mut end = max;
-    while !diff.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}\n[diff truncated — {total} bytes total]", &diff[..end])
-}
-
 /// Build a relative-path description string for a notify event.
 fn describe_event(event: &Event, cwd: &Path) -> Option<String> {
     match event.kind {
@@ -91,25 +72,27 @@ fn describe_event(event: &Event, cwd: &Path) -> Option<String> {
     }
 }
 
-fn log_git_diff(
+/// Check if HEAD moved (new commit). If so, log the commit message as a GitDiff event.
+fn check_for_new_commit(
     cwd: &Path,
-    last_diff: &mut String,
+    last_head: &mut String,
     ui_tx: Option<&tokio::sync::mpsc::UnboundedSender<SessionEvent>>,
 ) {
-    match git::current_diff(cwd) {
-        Ok(diff) if !diff.is_empty() && diff != *last_diff => {
-            let stored = truncate_diff(diff.clone(), MAX_DIFF_BYTES);
-            let ev = SessionEvent::new(EventType::GitDiff, stored);
-            if let Err(e) = append_event(ev.clone()) {
-                eprintln!("warn: failed to log git diff: {e}");
-            }
-            if let Some(tx) = ui_tx {
-                let _ = tx.send(ev);
-            }
-            *last_diff = diff;
-        }
-        Err(e) => eprintln!("warn: failed to capture git diff: {e}"),
-        _ => {}
+    let current_head = git::head_hash(cwd);
+    if current_head.is_empty() || current_head == *last_head {
+        return;
+    }
+    *last_head = current_head;
+    let message = git::latest_commit_message(cwd);
+    if message.is_empty() {
+        return;
+    }
+    let ev = SessionEvent::new(EventType::GitDiff, message);
+    if let Err(e) = append_event(ev.clone()) {
+        eprintln!("warn: failed to log commit: {e}");
+    }
+    if let Some(tx) = ui_tx {
+        let _ = tx.send(ev);
     }
 }
 
@@ -134,8 +117,7 @@ pub async fn watch(
     let ui_tx_clone = ui_tx.clone();
 
     tokio::task::spawn_blocking(move || {
-        let mut file_change_count: u32 = 0;
-        let mut last_diff = String::new();
+        let mut last_head = git::head_hash(&cwd_clone);
         // Maps path string → last time it was logged.
         let mut last_seen: HashMap<String, Instant> = HashMap::new();
 
@@ -160,10 +142,8 @@ pub async fn watch(
                             let _ = tx.send(ev);
                         }
 
-                        file_change_count += 1;
-                        if file_change_count % GIT_DIFF_INTERVAL == 0 {
-                            log_git_diff(&cwd_clone, &mut last_diff, ui_tx_clone.as_ref());
-                        }
+                        // Check for a new commit on every file change.
+                        check_for_new_commit(&cwd_clone, &mut last_head, ui_tx_clone.as_ref());
                     }
                 }
                 Err(e) => eprintln!("watch error: {e}"),
@@ -201,19 +181,6 @@ pub async fn watch(
             }
         } else {
             signal::ctrl_c().await.context("failed to listen for ctrl-c")?;
-        }
-    }
-
-    // Final diff snapshot on shutdown.
-    let shutdown_cwd = std::env::current_dir().unwrap_or_default();
-    if let Ok(diff) = crate::git::current_diff(&shutdown_cwd) {
-        if !diff.is_empty() {
-            let stored = truncate_diff(diff, MAX_DIFF_BYTES);
-            let ev = SessionEvent::new(EventType::GitDiff, stored);
-            if let Some(ref tx) = ui_tx {
-                let _ = tx.send(ev.clone());
-            }
-            let _ = append_event(ev);
         }
     }
 

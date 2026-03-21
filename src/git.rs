@@ -4,6 +4,32 @@
 use anyhow::{Context, Result};
 use git2::{DiffOptions, Repository};
 
+/// Return the current HEAD commit hash, or empty string if none.
+pub fn head_hash(path: &std::path::Path) -> String {
+    let repo = match Repository::discover(path) {
+        Ok(r) => r,
+        Err(_) => return String::new(),
+    };
+    repo.head()
+        .ok()
+        .and_then(|h| h.peel_to_commit().ok())
+        .map(|c| c.id().to_string())
+        .unwrap_or_default()
+}
+
+/// Return the summary line of the latest commit, or empty string if none.
+pub fn latest_commit_message(path: &std::path::Path) -> String {
+    let repo = match Repository::discover(path) {
+        Ok(r) => r,
+        Err(_) => return String::new(),
+    };
+    repo.head()
+        .ok()
+        .and_then(|h| h.peel_to_commit().ok())
+        .and_then(|c| c.summary().map(|s| s.to_string()))
+        .unwrap_or_default()
+}
+
 /// Return a unified diff of all uncommitted changes in the repo at `path`.
 /// Returns an empty string if there is no repo or no changes.
 pub fn current_diff(path: &std::path::Path) -> Result<String> {

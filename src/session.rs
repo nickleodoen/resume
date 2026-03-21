@@ -130,7 +130,7 @@ pub fn init() -> Result<()> {
 pub fn load() -> Result<Session> {
     let path = session_path()?;
     if !path.exists() {
-        anyhow::bail!("no session found at {}. Run `resume start` first.", path.display());
+        anyhow::bail!("no session found at {}. Run `resume` to start a session.", path.display());
     }
     let json = fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
@@ -161,28 +161,6 @@ pub fn append_event(event: SessionEvent) -> Result<()> {
         fs::write(path, json)?;
         Ok(())
     })
-}
-
-/// Mark the session as closed (prints a summary). No-op if no session exists.
-pub fn close() -> Result<()> {
-    let path = match session_path() {
-        Ok(p) => p,
-        Err(_) => {
-            println!("No session found.");
-            return Ok(());
-        }
-    };
-    if !path.exists() {
-        println!("No session found.");
-        return Ok(());
-    }
-    let sess = load()?;
-    println!(
-        "Session closed. {} event(s) recorded since {}.",
-        sess.events.len(),
-        sess.started_at.format("%Y-%m-%d %H:%M:%S UTC")
-    );
-    Ok(())
 }
 
 /// Append a shell command event. No-op (silent) if no session is active.
