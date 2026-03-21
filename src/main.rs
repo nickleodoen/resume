@@ -100,12 +100,12 @@ async fn main() -> Result<()> {
             println!("Session running in background (PID: {pid}). Use `resume stop` to end it.");
         }
         Some(Command::Show) => {
-            let sess = session::load()?;
+            let sess = session::load_latest()?;
             let briefing = summarize::generate(&sess).await?;
             println!("{}", briefing);
         }
         Some(Command::Status) => {
-            match session::load() {
+            match session::load_latest() {
                 Ok(sess) => session::print_status(&sess),
                 Err(_) => println!("No session found. Run `resume` to begin."),
             }

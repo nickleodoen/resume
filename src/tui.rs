@@ -117,8 +117,13 @@ impl App {
         self.input.clear();
         match cmd.as_str() {
             "show" => {
-                self.show_requested = true;
-                true
+                if std::env::var("ANTHROPIC_API_KEY").is_err() {
+                    self.message = Some("ANTHROPIC_API_KEY is not set — export it and try again".to_string());
+                    false
+                } else {
+                    self.show_requested = true;
+                    true
+                }
             }
             "finish" | "quit" | "exit" => true,
             "" => false,
@@ -167,7 +172,7 @@ pub async fn run() -> Result<()> {
 
     if app.show_requested {
         println!("Generating briefing...");
-        let sess = session::load()?;
+        let sess = session::load_latest()?;
         let briefing = crate::summarize::generate(&sess).await?;
         println!("{}", briefing);
     } else {

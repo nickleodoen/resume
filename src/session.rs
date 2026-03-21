@@ -1,4 +1,5 @@
 // Manages the session log: reading/writing SessionEvents to .resume/session.json.
+// Completed sessions are archived to .resume/sessions/ (last 10 kept).
 // Events are appended so no data is lost between watch cycles.
 
 use anyhow::{Context, Result};
@@ -68,6 +69,82 @@ fn pid_path() -> Result<PathBuf> {
     Ok(resume_dir()?.join("resume.pid"))
 }
 
+fn sessions_dir() -> Result<PathBuf> {
+    let dir = resume_dir()?.join("sessions");
+    fs::create_dir_all(&dir).context("failed to create .resume/sessions directory")?;
+    Ok(dir)
+}
+
+/// Archive session.json to .resume/sessions/{started_at}.json if it has events.
+fn archive_current_session() -> Result<()> {
+    let path = match session_path() {
+        Ok(p) => p,
+        Err(_) => return Ok(()),
+    };
+    if !path.exists() {
+        return Ok(());
+    }
+    let json = match fs::read_to_string(&path) {
+        Ok(j) => j,
+        Err(_) => return Ok(()),
+    };
+    let sess: Session = match serde_json::from_str(&json) {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+    if sess.events.is_empty() {
+        return Ok(());
+    }
+    let name = sess.started_at.format("%Y-%m-%dT%H-%M-%S").to_string();
+    let dest = sessions_dir()?.join(format!("{name}.json"));
+    fs::copy(&path, &dest).context("failed to archive session")?;
+    Ok(())
+}
+
+/// Delete oldest session archives, keeping only the `keep` most recent.
+fn prune_archives(keep: usize) -> Result<()> {
+    let dir = sessions_dir()?;
+    let mut entries: Vec<PathBuf> = fs::read_dir(&dir)
+        .context("failed to read sessions dir")?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+        .collect();
+    entries.sort(); // ISO timestamp filenames sort lexicographically = chronologically
+    if entries.len() > keep {
+        for old in &entries[..entries.len() - keep] {
+            let _ = fs::remove_file(old);
+        }
+    }
+    Ok(())
+}
+
+/// Load the most recent session that has events.
+/// Checks the current session first, then archives newest-first.
+pub fn load_latest() -> Result<Session> {
+    if let Ok(sess) = load() {
+        if !sess.events.is_empty() {
+            return Ok(sess);
+        }
+    }
+    let dir = sessions_dir()?;
+    let mut entries: Vec<PathBuf> = fs::read_dir(&dir)
+        .context("failed to read sessions dir")?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+        .collect();
+    entries.sort();
+    for path in entries.into_iter().rev() {
+        if let Ok(json) = fs::read_to_string(&path) {
+            if let Ok(sess) = serde_json::from_str::<Session>(&json) {
+                if !sess.events.is_empty() {
+                    return Ok(sess);
+                }
+            }
+        }
+    }
+    anyhow::bail!("No sessions with events found. Run `resume` to start a session.");
+}
+
 /// Acquire an exclusive lock on .resume/session.lock, call f(), then release.
 fn with_session_lock<F, T>(f: F) -> Result<T>
 where
@@ -110,8 +187,11 @@ pub fn clear_pid() -> Result<()> {
     Ok(())
 }
 
-/// Create a fresh session for the current directory. Overwrites any existing session.
+/// Archive any existing session, then create a fresh one for the current directory.
 pub fn init() -> Result<()> {
+    archive_current_session()?;
+    prune_archives(10)?;
+
     let project = std::env::current_dir()
         .context("failed to get cwd")?
         .file_name()
