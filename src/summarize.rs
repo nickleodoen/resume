@@ -9,7 +9,15 @@ use crate::git;
 use crate::session::{EventType, Session};
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
-const MODEL: &str = "claude-sonnet-4-6";
+
+// ── Model selection ───────────────────────────────────────────────────────────
+// Change DEFAULT_MODEL to any Anthropic model ID to switch permanently.
+// Override at runtime without recompiling: RESUME_MODEL=<model-id> resume
+//
+// Cheapest:  claude-haiku-4-5-20251001
+// Balanced:  claude-sonnet-4-6
+// Best:      claude-opus-4-6
+const DEFAULT_MODEL: &str = "claude-haiku-4-5-20251001";
 
 #[derive(Serialize)]
 struct ApiRequest {
@@ -118,8 +126,10 @@ pub async fn generate(sess: &Session) -> Result<String> {
 
     let prompt = build_prompt(sess, current_diff);
 
+    let model = std::env::var("RESUME_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+
     let request = ApiRequest {
-        model: MODEL.to_string(),
+        model,
         max_tokens: 2048,
         system: "You are an expert developer assistant helping engineers pick up where they left off.\n\
 Given a session log of shell commands, file changes, and git diffs, produce a structured briefing \

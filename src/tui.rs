@@ -1,16 +1,17 @@
 // Live terminal UI for resume sessions.
 //
 // Layout (top → bottom):
-//   Welcome box (mascot + info | tips)
+//   Welcome box (mascot + info | tips)   — fixed height
+//   Briefing area                         — scrollable, takes remaining space
 //   Separator ─────────────────────────
 //   > input prompt
 //   Separator ─────────────────────────
 //   Hint / error line
-//   Live feed (commits + files) + briefing below it
 //
 // Commands:
-//   show    — fetch AI briefing, display below live feed, stay in TUI
+//   show    — fetch AI briefing, display in briefing area, stay in TUI
 //   finish  — archive current session, start fresh (does not exit)
+//   ↑ ↓     — scroll briefing (PgUp / PgDn for faster scroll)
 //   Ctrl+C  — press twice within 1.5 s to exit
 
 use anyhow::{Context, Result};
@@ -24,7 +25,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Terminal,
 };
 use std::io;
@@ -100,6 +101,8 @@ struct App {
     briefing: Option<String>,
     briefing_header: Option<String>,
     briefing_loading: bool,
+    scroll_offset: u16,
+    scroll_max: u16,
 }
 
 impl App {
@@ -113,6 +116,8 @@ impl App {
             briefing: None,
             briefing_header: None,
             briefing_loading: false,
+            scroll_offset: 0,
+            scroll_max: 0,
         }
     }
 
@@ -238,7 +243,7 @@ async fn run_loop(
     let mut last_ctrl_c: Option<Instant> = None;
 
     loop {
-        terminal.draw(|f| render(f, app))?;
+        terminal.draw(|f| render(f, app))?;  // render takes &mut App to update scroll_max
 
         tokio::select! {
             maybe_ev = rx.recv() => {
@@ -254,6 +259,7 @@ async fn run_loop(
                         BriefingMsg::Startup(Ok(text)) => {
                             app.briefing = Some(text);
                             app.briefing_header = Some("Previous session".to_string());
+                            app.scroll_offset = 0;
                         }
                         BriefingMsg::Startup(Err(_)) => {
                             // No previous session or API error on startup — silent.
@@ -261,6 +267,7 @@ async fn run_loop(
                         BriefingMsg::UserRequested(Ok(text)) => {
                             app.briefing = Some(text);
                             app.briefing_header = Some("Briefing".to_string());
+                            app.scroll_offset = 0;
                         }
                         BriefingMsg::UserRequested(Err(e)) => {
                             app.message = Some(format!("show error: {e}"));
@@ -280,74 +287,100 @@ async fn run_loop(
                 }
 
                 while event::poll(Duration::ZERO).unwrap_or(false) {
-                    if let Ok(CEvent::Key(key)) = event::read() {
-                        match key.code {
-                            KeyCode::Char('c')
-                                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-                            {
-                                let now = Instant::now();
-                                if last_ctrl_c.map_or(false, |t| {
-                                    now.duration_since(t) < Duration::from_millis(1500)
-                                }) {
-                                    // Second Ctrl+C within window — exit.
-                                    if let Some(tx) = shutdown_tx.take() {
-                                        let _ = tx.send(());
-                                    }
-                                    return Ok(());
+                    match event::read() {
+                        Ok(CEvent::Mouse(mouse)) => {
+                            use crossterm::event::MouseEventKind;
+                            match mouse.kind {
+                                MouseEventKind::ScrollUp => {
+                                    app.scroll_offset = app.scroll_offset.saturating_sub(3);
                                 }
-                                last_ctrl_c = Some(now);
-                                app.message =
-                                    Some("Press Ctrl+C again to exit".to_string());
+                                MouseEventKind::ScrollDown => {
+                                    app.scroll_offset = app.scroll_offset.saturating_add(3);
+                                }
+                                _ => {}
                             }
-                            KeyCode::Enter => {
-                                match app.handle_command() {
-                                    Cmd::Finish => {
-                                        let count = app.events.len();
-                                        match session::init() {
-                                            Ok(()) => {
-                                                app.events.clear();
-                                                app.briefing = None;
-                                                app.briefing_header = None;
-                                                app.message = Some(format!(
-                                                    "Session saved · {} event{} · fresh session started",
-                                                    count,
-                                                    if count == 1 { "" } else { "s" }
-                                                ));
-                                            }
-                                            Err(e) => {
-                                                app.message =
-                                                    Some(format!("finish error: {e}"));
+                        }
+                        Ok(CEvent::Key(key)) => {
+                            match key.code {
+                                KeyCode::Char('c')
+                                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                                {
+                                    let now = Instant::now();
+                                    if last_ctrl_c.map_or(false, |t| {
+                                        now.duration_since(t) < Duration::from_millis(1500)
+                                    }) {
+                                        if let Some(tx) = shutdown_tx.take() {
+                                            let _ = tx.send(());
+                                        }
+                                        return Ok(());
+                                    }
+                                    last_ctrl_c = Some(now);
+                                    app.message =
+                                        Some("Press Ctrl+C again to exit".to_string());
+                                }
+                                KeyCode::Enter => {
+                                    match app.handle_command() {
+                                        Cmd::Finish => {
+                                            let count = app.events.len();
+                                            match session::init() {
+                                                Ok(()) => {
+                                                    app.events.clear();
+                                                    app.briefing = None;
+                                                    app.briefing_header = None;
+                                                    app.scroll_offset = 0;
+                                                    app.message = Some(format!(
+                                                        "Session saved · {} event{} · fresh session started",
+                                                        count,
+                                                        if count == 1 { "" } else { "s" }
+                                                    ));
+                                                }
+                                                Err(e) => {
+                                                    app.message =
+                                                        Some(format!("finish error: {e}"));
+                                                }
                                             }
                                         }
+                                        Cmd::SpawnBriefing => {
+                                            let tx = briefing_tx.clone();
+                                            tokio::spawn(async move {
+                                                let result = async {
+                                                    let sess = crate::session::load_latest()?;
+                                                    crate::summarize::generate(&sess).await
+                                                }
+                                                .await;
+                                                let _ = tx.send(BriefingMsg::UserRequested(
+                                                    result.map_err(|e| e.to_string()),
+                                                ));
+                                            });
+                                        }
+                                        Cmd::Stay => {}
                                     }
-                                    Cmd::SpawnBriefing => {
-                                        let tx = briefing_tx.clone();
-                                        tokio::spawn(async move {
-                                            let result = async {
-                                                let sess =
-                                                    crate::session::load_latest()?;
-                                                crate::summarize::generate(&sess).await
-                                            }
-                                            .await;
-                                            let _ = tx.send(BriefingMsg::UserRequested(
-                                                result.map_err(|e| e.to_string()),
-                                            ));
-                                        });
-                                    }
-                                    Cmd::Stay => {}
                                 }
+                                KeyCode::Up => {
+                                    app.scroll_offset = app.scroll_offset.saturating_sub(1);
+                                }
+                                KeyCode::Down => {
+                                    app.scroll_offset = app.scroll_offset.saturating_add(1);
+                                }
+                                KeyCode::PageUp => {
+                                    app.scroll_offset = app.scroll_offset.saturating_sub(10);
+                                }
+                                KeyCode::PageDown => {
+                                    app.scroll_offset = app.scroll_offset.saturating_add(10);
+                                }
+                                KeyCode::Char(c) => {
+                                    last_ctrl_c = None;
+                                    app.input.push(c);
+                                    app.message = None;
+                                }
+                                KeyCode::Backspace => {
+                                    app.input.pop();
+                                    app.message = None;
+                                }
+                                _ => {}
                             }
-                            KeyCode::Char(c) => {
-                                last_ctrl_c = None;
-                                app.input.push(c);
-                                app.message = None;
-                            }
-                            KeyCode::Backspace => {
-                                app.input.pop();
-                                app.message = None;
-                            }
-                            _ => {}
                         }
+                        _ => {}
                     }
                 }
             }
@@ -356,25 +389,80 @@ async fn run_loop(
     Ok(())
 }
 
-// ── Rendering ─────────────────────────────────────────────────────────────────
-fn render(f: &mut ratatui::Frame, app: &App) {
-    let area = f.area();
+// ── Content height estimator ──────────────────────────────────────────────────
+// Estimates how many terminal rows the briefing content will occupy so the layout
+// can decide whether to float the command bar up (fits) or pin it to the bottom.
+fn estimate_content_rows(app: &App, area_width: u16) -> u16 {
+    if app.briefing_loading {
+        2 // blank line + "Generating briefing..."
+    } else if let Some(briefing) = &app.briefing {
+        let avail = (area_width.saturating_sub(4) as usize).max(1);
+        let mut rows = 3u16; // blank + separator + blank
+        if app.briefing_header.is_some() {
+            rows += 1;
+        }
+        for line in briefing.lines() {
+            let len = line.len() + 2; // +2 for "  " indent
+            rows += ((len + avail - 1) / avail).max(1) as u16;
+        }
+        rows
+    } else {
+        0
+    }
+}
 
-    // chunks[0] welcome box  — fixed height
-    // chunks[1] separator    — 1
-    // chunks[2] input        — 1
-    // chunks[3] separator    — 1
-    // chunks[4] hint/error   — 1
-    // chunks[5] feed+briefing — remaining
+// ── Rendering ─────────────────────────────────────────────────────────────────
+// Takes &mut App so it can update scroll_max and clamp scroll_offset each frame.
+fn render(f: &mut ratatui::Frame, app: &mut App) {
+    let area = f.area();
     let box_height = (RESY_H as u16) + 5 + 2;
-    let chunks = Layout::vertical([
-        Constraint::Length(box_height),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
+    let cmd_bar_rows = 4u16; // sep + input + sep + hint
+
+    let available = area.height
+        .saturating_sub(box_height)
+        .saturating_sub(cmd_bar_rows);
+
+    let content_h = estimate_content_rows(app, area.width);
+    let fits = content_h == 0 || content_h <= available;
+
+    // Update scroll limits every frame so they react to terminal resize.
+    if fits {
+        app.scroll_max = 0;
+        app.scroll_offset = 0;
+    } else {
+        app.scroll_max = content_h.saturating_sub(available);
+        app.scroll_offset = app.scroll_offset.min(app.scroll_max);
+    }
+
+    // Layout:
+    //   [0] welcome box  — fixed
+    //   [1] content      — Length(content_h) when fits, Min(0) when overflows
+    //   [2] sep          — 1
+    //   [3] input        — 1  (command bar)
+    //   [4] sep          — 1
+    //   [5] hint/error   — 1
+    //   [6] trailing     — Min(0) spacer when fits, Length(0) dummy when overflows
+    let chunks = if fits {
+        Layout::vertical([
+            Constraint::Length(box_height),
+            Constraint::Length(content_h),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+    } else {
+        Layout::vertical([
+            Constraint::Length(box_height),
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(0),
+        ])
+    }
     .split(area);
 
     // ── Welcome box ───────────────────────────────────────────────────────────
@@ -402,7 +490,7 @@ fn render(f: &mut ratatui::Frame, app: &App) {
             "─".repeat(area.width as usize),
             Style::default().fg(Color::White),
         ))),
-        chunks[1],
+        chunks[2],
     );
 
     // ── Input line ────────────────────────────────────────────────────────────
@@ -412,7 +500,7 @@ fn render(f: &mut ratatui::Frame, app: &App) {
             Span::styled(app.input.clone(), Style::default().fg(Color::White)),
             Span::styled("█", Style::default().fg(Color::White)),
         ])),
-        chunks[2],
+        chunks[3],
     );
 
     // ── Separator below input ─────────────────────────────────────────────────
@@ -421,7 +509,7 @@ fn render(f: &mut ratatui::Frame, app: &App) {
             "─".repeat(area.width as usize),
             Style::default().fg(Color::White),
         ))),
-        chunks[3],
+        chunks[4],
     );
 
     // ── Hint / error ──────────────────────────────────────────────────────────
@@ -431,80 +519,33 @@ fn render(f: &mut ratatui::Frame, app: &App) {
                 Span::raw("  "),
                 Span::styled(msg.clone(), Style::default().fg(GRAY)),
             ])),
-            chunks[4],
+            chunks[5],
         );
     }
 
-    // ── Live feed + briefing ──────────────────────────────────────────────────
-    let feed_area = chunks[5];
+    // ── Briefing (scrollable) ─────────────────────────────────────────────────
+    let feed_area = chunks[1];
     if feed_area.height == 0 {
         return;
     }
-    let max_w = (feed_area.width.saturating_sub(6)) as usize;
-
-    // Commits (newest first)
-    let commits: Vec<Line> = app
-        .events
-        .iter()
-        .rev()
-        .filter(|e| matches!(e.event_type, crate::session::EventType::GitDiff))
-        .map(|e| {
-            let msg = e.content.lines().next().unwrap_or("").to_string();
-            let msg = if msg.len() > max_w && max_w > 3 {
-                format!("{}…", &msg[..max_w - 1])
-            } else {
-                msg
-            };
-            Line::from(vec![
-                Span::raw("  "),
-                Span::styled("↑ ", Style::default().fg(BRAND).add_modifier(Modifier::BOLD)),
-                Span::styled(msg, Style::default().fg(Color::White)),
-            ])
-        })
-        .collect();
-
-    // Unique files touched (newest first, deduped)
-    let mut seen_files = std::collections::HashSet::new();
-    let files: Vec<Line> = app
-        .events
-        .iter()
-        .rev()
-        .filter(|e| matches!(e.event_type, crate::session::EventType::FileChange))
-        .filter(|e| seen_files.insert(e.content.clone()))
-        .map(|e| {
-            let path = if e.content.len() > max_w && max_w > 3 {
-                format!("{}…", &e.content[..max_w - 1])
-            } else {
-                e.content.clone()
-            };
-            Line::from(vec![
-                Span::raw("  "),
-                Span::styled("  ", Style::default().fg(GRAY)),
-                Span::styled(path, Style::default().fg(GRAY)),
-            ])
-        })
-        .collect();
 
     let mut feed: Vec<Line> = Vec::new();
-    if commits.is_empty() && files.is_empty() {
-        feed.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Watching for changes…", Style::default().fg(BRAND_DIM)),
-        ]));
-    } else {
-        feed.extend(commits);
-        if !files.is_empty() {
-            feed.push(Line::raw(""));
-            feed.extend(files);
-        }
-    }
 
-    // Briefing — shown below the live feed
     if app.briefing_loading {
+        // Animate dots: phase cycles 0→1→2 every 400 ms
+        let dot_phase = (app.started.elapsed().as_millis() / 400) % 3;
+        let dots = match dot_phase {
+            0 => ".  ",
+            1 => ".. ",
+            _ => "...",
+        };
         feed.push(Line::raw(""));
         feed.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled("Generating briefing…", Style::default().fg(BRAND_DIM)),
+            Span::styled(
+                format!("Generating briefing{dots}"),
+                Style::default().fg(BRAND_DIM),
+            ),
         ]));
     } else if let Some(briefing) = &app.briefing {
         let sep_w = feed_area.width.saturating_sub(4) as usize;
@@ -531,7 +572,12 @@ fn render(f: &mut ratatui::Frame, app: &App) {
         }
     }
 
-    f.render_widget(Paragraph::new(feed), feed_area);
+    f.render_widget(
+        Paragraph::new(feed)
+            .wrap(Wrap { trim: false })
+            .scroll((app.scroll_offset, 0)),
+        feed_area,
+    );
 }
 
 fn render_left(f: &mut ratatui::Frame, app: &App, area: Rect) {
