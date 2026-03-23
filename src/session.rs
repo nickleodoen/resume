@@ -55,11 +55,6 @@ impl Session {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Note {
-    pub timestamp: DateTime<Utc>,
-    pub text: String,
-}
 
 /// Central per-project data directory: ~/.resume/projects/<mirrored-cwd>/
 /// e.g. /Users/alice/code/myapp  →  ~/.resume/projects/Users/alice/code/myapp/
@@ -103,8 +98,8 @@ fn sessions_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn notes_path() -> Result<PathBuf> {
-    Ok(resume_dir()?.join("notes.json"))
+pub fn notes_path() -> Result<PathBuf> {
+    Ok(resume_dir()?.join("notes.txt"))
 }
 
 /// Archive session.json to .resume/sessions/{started_at}.json if it has events.
@@ -251,27 +246,25 @@ pub fn init() -> Result<()> {
     Ok(())
 }
 
-/// Load all notes for the current project. Returns empty vec if none saved yet.
-pub fn load_notes() -> Result<Vec<Note>> {
+/// Load all notes for the current project as raw text.
+pub fn load_notes_text() -> Result<String> {
     let path = notes_path()?;
     if !path.exists() {
-        return Ok(Vec::new());
+        return Ok(String::new());
     }
-    let json = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
-    serde_json::from_str::<Vec<Note>>(&json).context("failed to parse notes.json")
+    fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))
 }
 
-/// Append a note for the current project.
+/// Append a line to the notes file for the current project.
 pub fn append_note(text: &str) -> Result<()> {
-    let mut notes = load_notes().unwrap_or_default();
-    notes.push(Note {
-        timestamp: Utc::now(),
-        text: text.to_string(),
-    });
     let path = notes_path()?;
-    let json = serde_json::to_string_pretty(&notes)?;
-    fs::write(&path, json).context("failed to write notes.json")?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .context("failed to open notes.txt")?;
+    use std::io::Write;
+    writeln!(file, "{}", text).context("failed to write note")?;
     Ok(())
 }
 
@@ -279,21 +272,8 @@ pub fn append_note(text: &str) -> Result<()> {
 pub fn clear_notes() -> Result<()> {
     let path = notes_path()?;
     if path.exists() {
-        fs::remove_file(&path).context("failed to remove notes.json")?;
+        fs::remove_file(&path).context("failed to remove notes.txt")?;
     }
-    Ok(())
-}
-
-/// Delete a single note by 1-based index (as shown by `resume notes`).
-pub fn delete_note(n: usize) -> Result<()> {
-    let mut notes = load_notes().unwrap_or_default();
-    if n == 0 || n > notes.len() {
-        anyhow::bail!("Note {} not found — run `resume notes` to see valid numbers.", n);
-    }
-    notes.remove(n - 1);
-    let path = notes_path()?;
-    let json = serde_json::to_string_pretty(&notes)?;
-    fs::write(&path, json).context("failed to write notes.json")?;
     Ok(())
 }
 

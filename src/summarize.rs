@@ -6,7 +6,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::git;
-use crate::session::{EventType, Note, Session};
+use crate::session::{EventType, Session};
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 
@@ -43,7 +43,7 @@ struct ContentBlock {
     text: String,
 }
 
-fn build_prompt(sess: &Session, notes: &[Note], current_diff: Option<String>) -> String {
+fn build_prompt(sess: &Session, notes_text: &str, current_diff: Option<String>) -> String {
     let mut lines = Vec::new();
     lines.push(format!("Project: {}", sess.project));
     lines.push(format!(
@@ -109,11 +109,9 @@ fn build_prompt(sess: &Session, notes: &[Note], current_diff: Option<String>) ->
     }
 
     // Developer notes — persisted across sessions, highest signal for the briefing
-    if !notes.is_empty() {
+    if !notes_text.trim().is_empty() {
         lines.push("=== Developer notes (manually saved, treat as high-signal context) ===".to_string());
-        for note in notes {
-            lines.push(format!("  [{}] {}", note.timestamp.format("%Y-%m-%d %H:%M"), note.text));
-        }
+        lines.push(notes_text.to_string());
         lines.push(String::new());
     }
 
@@ -121,7 +119,7 @@ fn build_prompt(sess: &Session, notes: &[Note], current_diff: Option<String>) ->
 }
 
 /// Call the Anthropic API and return a developer briefing for the session.
-pub async fn generate(sess: &Session, notes: &[Note]) -> Result<String> {
+pub async fn generate(sess: &Session, notes_text: &str) -> Result<String> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .context("ANTHROPIC_API_KEY environment variable not set")?;
 
@@ -133,7 +131,7 @@ pub async fn generate(sess: &Session, notes: &[Note]) -> Result<String> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let current_diff = git::current_diff(&cwd).ok().filter(|d| !d.is_empty());
 
-    let prompt = build_prompt(sess, notes, current_diff);
+    let prompt = build_prompt(sess, notes_text, current_diff);
 
     let model = std::env::var("RESUME_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
 

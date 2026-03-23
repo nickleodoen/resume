@@ -22,6 +22,14 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum NotesAction {
+    /// Clear all notes for this project
+    Clear,
+    /// Open notes in $VISUAL or the system default editor
+    Open,
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// End the current session
     Finish,
@@ -45,20 +53,17 @@ enum Command {
     Show,
     /// Print a raw list of all captured events this session
     Status,
-    /// Save a note for this project, or manage existing notes
+    /// Save a note for this project
     Note {
         /// The note text — everything after `note` is captured as the note
-        #[arg(trailing_var_arg = true, num_args = 0.., conflicts_with_all = ["clear", "delete"])]
+        #[arg(trailing_var_arg = true, num_args = 1..)]
         text: Vec<String>,
-        /// Clear all notes for this project
-        #[arg(long, conflicts_with_all = ["text", "delete"])]
-        clear: bool,
-        /// Delete a specific note by its number (see `resume notes` for numbers)
-        #[arg(long, value_name = "N", conflicts_with_all = ["text", "clear"])]
-        delete: Option<usize>,
     },
-    /// List all saved notes for this project
-    Notes,
+    /// List, clear, or open notes for this project
+    Notes {
+        #[command(subcommand)]
+        action: Option<NotesAction>,
+    },
     /// Append a shell command to the session log (called by the shell hook)
     #[command(hide = true)]
     LogCommand {
@@ -116,42 +121,37 @@ async fn main() -> Result<()> {
         }
         Some(Command::Show) => {
             let sess = session::load_latest()?;
-            let notes = session::load_notes().unwrap_or_default();
-            let briefing = summarize::generate(&sess, &notes).await?;
+            let notes_text = session::load_notes_text().unwrap_or_default();
+            let briefing = summarize::generate(&sess, &notes_text).await?;
             println!("{}", briefing);
         }
-        Some(Command::Note { text, clear, delete }) => {
-            if clear {
-                session::clear_notes()?;
-                println!("All notes cleared.");
-            } else if let Some(n) = delete {
-                session::delete_note(n)?;
-                println!("Note {n} deleted.");
-            } else {
-                let note_text = text.join(" ");
-                if note_text.trim().is_empty() {
-                    eprintln!("Usage: resume note <text>  |  --clear  |  --delete <N>");
-                    std::process::exit(1);
-                }
-                session::append_note(&note_text)?;
-                println!("Note saved.");
-            }
+        Some(Command::Note { text }) => {
+            let note_text = text.join(" ");
+            session::append_note(&note_text)?;
+            println!("Note saved.");
         }
-        Some(Command::Notes) => {
-            let notes = session::load_notes().unwrap_or_default();
-            if notes.is_empty() {
+        Some(Command::Notes { action: None }) => {
+            let text = session::load_notes_text().unwrap_or_default();
+            if text.trim().is_empty() {
                 println!("No notes for this project. Use `resume note <text>` to add one.");
             } else {
-                println!("Notes for this project ({} total):\n", notes.len());
-                for (i, note) in notes.iter().enumerate() {
-                    println!(
-                        "  [{}] {}  {}",
-                        i + 1,
-                        note.timestamp.format("%Y-%m-%d %H:%M"),
-                        note.text
-                    );
-                }
+                print!("{}", text);
             }
+        }
+        Some(Command::Notes { action: Some(NotesAction::Clear) }) => {
+            session::clear_notes()?;
+            println!("All notes cleared.");
+        }
+        Some(Command::Notes { action: Some(NotesAction::Open) }) => {
+            let path = session::notes_path()?;
+            if !path.exists() {
+                std::fs::File::create(&path).context("failed to create notes.txt")?;
+            }
+            let spawned = std::env::var("VISUAL")
+                .ok()
+                .map(|ed| std::process::Command::new(&ed).arg(&path).spawn())
+                .unwrap_or_else(|| std::process::Command::new("open").arg(&path).spawn());
+            spawned.context("failed to open editor")?;
         }
         Some(Command::Status) => {
             match session::load_latest() {

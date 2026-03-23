@@ -9,10 +9,12 @@
 //   Hint / error line
 //
 // Commands:
-//   show          — fetch AI briefing, display in briefing area, stay in TUI
-//   finish        — archive current session, start fresh (does not exit)
-//   note <text>   — save a note for this project (persists across sessions)
-//   notes         — list all saved notes for this project
+//   show         — fetch AI briefing, display in briefing area, stay in TUI
+//   finish       — archive current session, start fresh (does not exit)
+//   note <text>  — save a note for this project (persists across sessions)
+//   notes        — display all notes in the briefing area
+//   notes open   — open notes.txt in $VISUAL / default app (non-blocking)
+//   notes clear  — delete all notes for this project
 //   ↑ ↓     — scroll briefing (PgUp / PgDn for faster scroll)
 //   Ctrl+C  — press twice within 1.5 s to exit
 
@@ -88,11 +90,13 @@ enum BriefingMsg {
 
 // ── Command result ────────────────────────────────────────────────────────────
 enum Cmd {
-    Finish,            // archive session, start fresh — stays in TUI
-    SpawnBriefing,     // kick off API call
-    SaveNote(String),  // persist a note for this project
-    ShowNotes,         // display all notes in the briefing area
-    Stay,              // no-op
+    Finish,           // archive session, start fresh — stays in TUI
+    SpawnBriefing,    // kick off API call
+    SaveNote(String), // persist a note for this project
+    ShowNotes,        // display all notes in the briefing area
+    ClearNotes,       // delete all notes for this project
+    OpenNotes,        // open notes.txt in $VISUAL / open (non-blocking)
+    Stay,             // no-op
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -166,6 +170,8 @@ impl App {
             }
             "finish" => Cmd::Finish,
             "notes" => Cmd::ShowNotes,
+            "notes open" | "note open" => Cmd::OpenNotes,
+            "notes clear" | "notes --clear" | "note clear" | "note --clear" => Cmd::ClearNotes,
             "note" => {
                 self.message = Some("Usage: note <text>".to_string());
                 Cmd::Stay
@@ -182,7 +188,7 @@ impl App {
             }
             _ => {
                 self.message = Some(
-                    "Unknown command — try `show`, `finish`, `note <text>`, or `notes`"
+                    "Unknown command — try `show`, `finish`, `note <text>`, `notes`, `notes open`, `notes clear`"
                         .to_string(),
                 );
                 Cmd::Stay
@@ -227,8 +233,8 @@ pub async fn run() -> Result<()> {
         tokio::spawn(async move {
             let result = async {
                 let sess = crate::session::load_latest()?;
-                let notes = crate::session::load_notes().unwrap_or_default();
-                crate::summarize::generate(&sess, &notes).await
+                let notes_text = crate::session::load_notes_text().unwrap_or_default();
+                crate::summarize::generate(&sess, &notes_text).await
             }
             .await;
             let _ = tx.send(BriefingMsg::Startup(result.map_err(|e| e.to_string())));
@@ -369,14 +375,67 @@ async fn run_loop(
                                             tokio::spawn(async move {
                                                 let result = async {
                                                     let sess = crate::session::load_latest()?;
-                                                    let notes = crate::session::load_notes().unwrap_or_default();
-                                                    crate::summarize::generate(&sess, &notes).await
+                                                    let notes_text = crate::session::load_notes_text().unwrap_or_default();
+                                                    crate::summarize::generate(&sess, &notes_text).await
                                                 }
                                                 .await;
                                                 let _ = tx.send(BriefingMsg::UserRequested(
                                                     result.map_err(|e| e.to_string()),
                                                 ));
                                             });
+                                        }
+                                        Cmd::ClearNotes => {
+                                            match session::clear_notes() {
+                                                Ok(()) => {
+                                                    app.message =
+                                                        Some("All notes cleared.".to_string());
+                                                    if app.briefing_header.as_deref()
+                                                        == Some("Notes")
+                                                    {
+                                                        app.briefing = None;
+                                                        app.briefing_header = None;
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    app.message =
+                                                        Some(format!("clear error: {e}"));
+                                                }
+                                            }
+                                        }
+                                        Cmd::OpenNotes => {
+                                            match session::notes_path() {
+                                                Ok(path) => {
+                                                    // Ensure the file exists before opening.
+                                                    if !path.exists() {
+                                                        let _ = std::fs::File::create(&path);
+                                                    }
+                                                    // Prefer $VISUAL (GUI editor); fall back to macOS `open`.
+                                                    let spawned = std::env::var("VISUAL")
+                                                        .ok()
+                                                        .map(|ed| {
+                                                            std::process::Command::new(&ed)
+                                                                .arg(&path)
+                                                                .spawn()
+                                                        })
+                                                        .unwrap_or_else(|| {
+                                                            std::process::Command::new("open")
+                                                                .arg(&path)
+                                                                .spawn()
+                                                        });
+                                                    app.message = match spawned {
+                                                        Ok(_) => Some(
+                                                            "Notes opened in editor.".to_string(),
+                                                        ),
+                                                        Err(e) => Some(format!(
+                                                            "failed to open editor: {e}"
+                                                        )),
+                                                    };
+                                                }
+                                                Err(e) => {
+                                                    app.message =
+                                                        Some(format!("notes error: {e}"));
+                                                }
+                                            }
                                         }
                                         Cmd::SaveNote(text) => {
                                             match session::append_note(&text) {
@@ -393,28 +452,14 @@ async fn run_loop(
                                             }
                                         }
                                         Cmd::ShowNotes => {
-                                            match session::load_notes() {
-                                                Ok(notes) if notes.is_empty() => {
+                                            match session::load_notes_text() {
+                                                Ok(text) if text.trim().is_empty() => {
                                                     app.message = Some(
                                                         "No notes yet — type `note <text>` to add one."
                                                             .to_string(),
                                                     );
                                                 }
-                                                Ok(notes) => {
-                                                    let text = notes
-                                                        .iter()
-                                                        .enumerate()
-                                                        .map(|(i, n)| {
-                                                            format!(
-                                                                "[{}] {}  {}",
-                                                                i + 1,
-                                                                n.timestamp
-                                                                    .format("%Y-%m-%d %H:%M"),
-                                                                n.text
-                                                            )
-                                                        })
-                                                        .collect::<Vec<_>>()
-                                                        .join("\n");
+                                                Ok(text) => {
                                                     app.briefing = Some(text);
                                                     app.briefing_header =
                                                         Some("Notes".to_string());
@@ -755,7 +800,7 @@ fn render_right(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 "notes   ",
                 Style::default().fg(BRAND).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("list all saved notes", Style::default().fg(GRAY)),
+            Span::styled("list · open · clear", Style::default().fg(GRAY)),
         ]),
         Line::from(vec![
             Span::styled(
