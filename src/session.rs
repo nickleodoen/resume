@@ -1,5 +1,9 @@
-// Manages the session log: reading/writing SessionEvents to .resume/session.json.
-// Completed sessions are archived to .resume/sessions/ (last 10 kept).
+// Manages the session log: reading/writing SessionEvents to session.json.
+// Session data is stored centrally at ~/.resume/projects/<mirrored-cwd>/ so
+// that a globally-installed `resume` binary never scatters data across repos.
+// Completed sessions are archived to the per-project sessions/ subdir (last 10 kept).
+// A local .resume/.active sentinel file is created when a session starts so the
+// shell hook can do a cheap stat check without spawning an extra process.
 // Events are appended so no data is lost between watch cycles.
 
 use anyhow::{Context, Result};
@@ -51,10 +55,34 @@ impl Session {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Note {
+    pub timestamp: DateTime<Utc>,
+    pub text: String,
+}
+
+/// Central per-project data directory: ~/.resume/projects/<mirrored-cwd>/
+/// e.g. /Users/alice/code/myapp  →  ~/.resume/projects/Users/alice/code/myapp/
 fn resume_dir() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("could not find home directory")?;
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    // Strip leading "/" so the mirror path is relative.
+    let relative = cwd.strip_prefix("/").unwrap_or(&cwd);
+    let dir = home.join(".resume").join("projects").join(relative);
+    fs::create_dir_all(&dir).context("failed to create resume project directory")?;
+    Ok(dir)
+}
+
+/// Local .resume/ directory in the project root — used only for the sentinel file.
+fn local_resume_dir() -> Result<PathBuf> {
     let dir = PathBuf::from(".resume");
     fs::create_dir_all(&dir).context("failed to create .resume directory")?;
     Ok(dir)
+}
+
+/// .resume/.active — presence indicates an active session; checked by the shell hook.
+fn sentinel_path() -> Result<PathBuf> {
+    Ok(local_resume_dir()?.join(".active"))
 }
 
 fn session_path() -> Result<PathBuf> {
@@ -71,8 +99,12 @@ fn pid_path() -> Result<PathBuf> {
 
 fn sessions_dir() -> Result<PathBuf> {
     let dir = resume_dir()?.join("sessions");
-    fs::create_dir_all(&dir).context("failed to create .resume/sessions directory")?;
+    fs::create_dir_all(&dir).context("failed to create sessions directory")?;
     Ok(dir)
+}
+
+fn notes_path() -> Result<PathBuf> {
+    Ok(resume_dir()?.join("notes.json"))
 }
 
 /// Archive session.json to .resume/sessions/{started_at}.json if it has events.
@@ -187,6 +219,19 @@ pub fn clear_pid() -> Result<()> {
     Ok(())
 }
 
+/// Create .resume/.active so the shell hook knows a session is live.
+pub fn create_sentinel() -> Result<()> {
+    fs::write(sentinel_path()?, b"").context("failed to create session sentinel")?;
+    Ok(())
+}
+
+/// Remove .resume/.active when the session ends.
+pub fn clear_sentinel() {
+    if let Ok(p) = sentinel_path() {
+        let _ = fs::remove_file(p);
+    }
+}
+
 /// Archive any existing session, then create a fresh one for the current directory.
 pub fn init() -> Result<()> {
     archive_current_session()?;
@@ -202,6 +247,53 @@ pub fn init() -> Result<()> {
     let path = session_path()?;
     let json = serde_json::to_string_pretty(&sess)?;
     fs::write(&path, json).context("failed to write session.json")?;
+    create_sentinel()?;
+    Ok(())
+}
+
+/// Load all notes for the current project. Returns empty vec if none saved yet.
+pub fn load_notes() -> Result<Vec<Note>> {
+    let path = notes_path()?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let json = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_str::<Vec<Note>>(&json).context("failed to parse notes.json")
+}
+
+/// Append a note for the current project.
+pub fn append_note(text: &str) -> Result<()> {
+    let mut notes = load_notes().unwrap_or_default();
+    notes.push(Note {
+        timestamp: Utc::now(),
+        text: text.to_string(),
+    });
+    let path = notes_path()?;
+    let json = serde_json::to_string_pretty(&notes)?;
+    fs::write(&path, json).context("failed to write notes.json")?;
+    Ok(())
+}
+
+/// Remove all notes for the current project.
+pub fn clear_notes() -> Result<()> {
+    let path = notes_path()?;
+    if path.exists() {
+        fs::remove_file(&path).context("failed to remove notes.json")?;
+    }
+    Ok(())
+}
+
+/// Delete a single note by 1-based index (as shown by `resume notes`).
+pub fn delete_note(n: usize) -> Result<()> {
+    let mut notes = load_notes().unwrap_or_default();
+    if n == 0 || n > notes.len() {
+        anyhow::bail!("Note {} not found — run `resume notes` to see valid numbers.", n);
+    }
+    notes.remove(n - 1);
+    let path = notes_path()?;
+    let json = serde_json::to_string_pretty(&notes)?;
+    fs::write(&path, json).context("failed to write notes.json")?;
     Ok(())
 }
 
@@ -245,7 +337,8 @@ pub fn append_event(event: SessionEvent) -> Result<()> {
 
 /// Append a shell command event. No-op (silent) if no session is active.
 pub fn log_command(cmd: &str) -> Result<()> {
-    if !PathBuf::from(".resume/session.json").exists() {
+    // Fast sentinel check — avoids touching the central store when no session is live.
+    if !PathBuf::from(".resume/.active").exists() {
         return Ok(());
     }
     let event = SessionEvent::new(EventType::Command, cmd);

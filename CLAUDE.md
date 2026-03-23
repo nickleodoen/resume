@@ -141,11 +141,13 @@ comment (`# --- resume shell hook ---`) to detect existing installs.
 
 ## Next Steps (Priority Order)
 
-1. End-to-end test: `cargo install --path .`, `resume init --install-hook`, open a new terminal, run `resume`, do work, press Ctrl-C or `finish`, then `resume show`
-2. TUI: make the event list scrollable (currently just renders newest-first, no scroll state)
-3. TUI: show a live git diff panel on the right side (split layout) for the most recent diff
-4. Periodically evict stale entries from the `last_seen` debounce map (low priority — only matters for multi-hour sessions)
-5. Write a proper integration test (create temp dir, start session, append events, verify JSON, check lock)
+1. End-to-end test: `cargo install --path .`, `resume new --install-hook`, open a new terminal, run `resume`, do work, press Ctrl-C or `finish`, then `resume show`
+2. `resume notes` subcommand to list all saved notes for the current project
+3. `resume note --clear` or `resume note --delete <n>` to manage notes
+4. TUI: show saved notes in the UI (e.g. a notes panel or listing below events)
+5. TUI: show a live git diff panel on the right side (split layout) for the most recent diff
+6. Periodically evict stale entries from the `last_seen` debounce map (low priority — only matters for multi-hour sessions)
+7. Write a proper integration test (create temp dir, start session, append events, verify JSON, check lock)
 
 ## Key Decisions
 
@@ -191,7 +193,21 @@ comment (`# --- resume shell hook ---`) to detect existing installs.
    - Block elements (U+2580-U+259F like `█`) have "ambiguous" east Asian width — Nerd Fonts treat them as 2 columns. A 52-char art string becomes ~100 columns at runtime.
    - `Color::Rgb()` requires `COLORTERM=truecolor` to be set *before* the process starts; standard ANSI colors do not.
 
+## What Was Built — Session 6 (2026-03-23)
+
+1. **Central per-project storage** (`session.rs`): `resume_dir()` now mirrors the project's absolute path under `~/.resume/projects/`. e.g. `/Users/alice/code/myapp` → `~/.resume/projects/Users/alice/code/myapp/`. All session data, archives, lock, PID, and notes live there — nothing spills into the project repo.
+
+2. **Local sentinel file** (`session.rs`): `.resume/.active` (empty file) is created in the project directory when a session starts and removed when it ends. The shell hook checks this file for a cheap stat without needing the central store path in shell code.
+
+3. **Shell hooks updated** (`main.rs`): Both `SHELL_HOOK_ZSH` and `SHELL_HOOK_BASH` now check `[[ -f .resume/.active ]]` instead of `.resume/session.json`. Users with old hooks need to re-run `resume new --install-hook`.
+
+4. **`resume note <text>` command** (`main.rs`, `session.rs`): Appends a timestamped note to `notes.json` in the project's central store dir. Notes persist across sessions and are never archived.
+
+5. **Notes in briefing** (`summarize.rs`): `generate()` now accepts `&[Note]`. Notes are included in the prompt as a high-signal `=== Developer notes ===` section. The system prompt instructs the model to treat them as high-priority context.
+
+6. **`cargo build` confirmed clean.**
+
 ## Known Issues / Bugs
 
 - `reqwest 0.11` requires `openssl` on macOS; may need `brew install openssl` if build fails (using `rustls-tls` feature avoids this)
-- `cargo build` passes clean as of session 4
+- Users who installed the old shell hook (checking `.resume/session.json`) need to re-run `resume new --install-hook` to get the new `.resume/.active` check

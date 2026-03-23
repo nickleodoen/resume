@@ -6,7 +6,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::git;
-use crate::session::{EventType, Session};
+use crate::session::{EventType, Note, Session};
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 
@@ -43,7 +43,7 @@ struct ContentBlock {
     text: String,
 }
 
-fn build_prompt(sess: &Session, current_diff: Option<String>) -> String {
+fn build_prompt(sess: &Session, notes: &[Note], current_diff: Option<String>) -> String {
     let mut lines = Vec::new();
     lines.push(format!("Project: {}", sess.project));
     lines.push(format!(
@@ -108,11 +108,20 @@ fn build_prompt(sess: &Session, current_diff: Option<String>) -> String {
         }
     }
 
+    // Developer notes — persisted across sessions, highest signal for the briefing
+    if !notes.is_empty() {
+        lines.push("=== Developer notes (manually saved, treat as high-signal context) ===".to_string());
+        for note in notes {
+            lines.push(format!("  [{}] {}", note.timestamp.format("%Y-%m-%d %H:%M"), note.text));
+        }
+        lines.push(String::new());
+    }
+
     lines.join("\n")
 }
 
 /// Call the Anthropic API and return a developer briefing for the session.
-pub async fn generate(sess: &Session) -> Result<String> {
+pub async fn generate(sess: &Session, notes: &[Note]) -> Result<String> {
     let api_key = std::env::var("ANTHROPIC_API_KEY")
         .context("ANTHROPIC_API_KEY environment variable not set")?;
 
@@ -124,7 +133,7 @@ pub async fn generate(sess: &Session) -> Result<String> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let current_diff = git::current_diff(&cwd).ok().filter(|d| !d.is_empty());
 
-    let prompt = build_prompt(sess, current_diff);
+    let prompt = build_prompt(sess, notes, current_diff);
 
     let model = std::env::var("RESUME_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
 
@@ -132,8 +141,8 @@ pub async fn generate(sess: &Session) -> Result<String> {
         model,
         max_tokens: 2048,
         system: "You are an expert developer assistant helping engineers pick up where they left off.\n\
-Given a session log of shell commands, file changes, and git diffs, produce a structured briefing \
-with exactly these four sections:\n\n\
+Given a session log of shell commands, file changes, git diffs, and optional developer notes, \
+produce a structured briefing with exactly these four sections:\n\n\
 **What I was working on**\n\
 One or two sentences naming the feature, bug, or task. Be specific — use actual file names and \
 function/component names from the log.\n\n\
@@ -144,7 +153,9 @@ One sentence describing the exact state of things at the end of the session — 
 what was broken, or what was about to happen next.\n\n\
 **Recommended next step**\n\
 One actionable sentence telling the developer exactly what to do first when they sit back down.\n\n\
-Rules: be concrete, use real names from the log, skip generic filler, keep total output under 200 words."
+Rules: be concrete, use real names from the log, skip generic filler, keep total output under 200 words. \
+If developer notes are present, treat them as high-priority context — they capture intent and decisions \
+that may not be visible in file changes alone."
             .to_string(),
         messages: vec![Message {
             role: "user".to_string(),

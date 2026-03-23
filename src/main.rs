@@ -45,6 +45,20 @@ enum Command {
     Show,
     /// Print a raw list of all captured events this session
     Status,
+    /// Save a note for this project, or manage existing notes
+    Note {
+        /// The note text — everything after `note` is captured as the note
+        #[arg(trailing_var_arg = true, num_args = 0.., conflicts_with_all = ["clear", "delete"])]
+        text: Vec<String>,
+        /// Clear all notes for this project
+        #[arg(long, conflicts_with_all = ["text", "delete"])]
+        clear: bool,
+        /// Delete a specific note by its number (see `resume notes` for numbers)
+        #[arg(long, value_name = "N", conflicts_with_all = ["text", "clear"])]
+        delete: Option<usize>,
+    },
+    /// List all saved notes for this project
+    Notes,
     /// Append a shell command to the session log (called by the shell hook)
     #[command(hide = true)]
     LogCommand {
@@ -66,6 +80,7 @@ async fn main() -> Result<()> {
                 kill_process(pid);
                 session::clear_pid()?;
             }
+            session::clear_sentinel();
             println!("Session ended. Run `resume show` for a briefing.");
         }
         Some(Command::New { install_hook }) => {
@@ -101,8 +116,42 @@ async fn main() -> Result<()> {
         }
         Some(Command::Show) => {
             let sess = session::load_latest()?;
-            let briefing = summarize::generate(&sess).await?;
+            let notes = session::load_notes().unwrap_or_default();
+            let briefing = summarize::generate(&sess, &notes).await?;
             println!("{}", briefing);
+        }
+        Some(Command::Note { text, clear, delete }) => {
+            if clear {
+                session::clear_notes()?;
+                println!("All notes cleared.");
+            } else if let Some(n) = delete {
+                session::delete_note(n)?;
+                println!("Note {n} deleted.");
+            } else {
+                let note_text = text.join(" ");
+                if note_text.trim().is_empty() {
+                    eprintln!("Usage: resume note <text>  |  --clear  |  --delete <N>");
+                    std::process::exit(1);
+                }
+                session::append_note(&note_text)?;
+                println!("Note saved.");
+            }
+        }
+        Some(Command::Notes) => {
+            let notes = session::load_notes().unwrap_or_default();
+            if notes.is_empty() {
+                println!("No notes for this project. Use `resume note <text>` to add one.");
+            } else {
+                println!("Notes for this project ({} total):\n", notes.len());
+                for (i, note) in notes.iter().enumerate() {
+                    println!(
+                        "  [{}] {}  {}",
+                        i + 1,
+                        note.timestamp.format("%Y-%m-%d %H:%M"),
+                        note.text
+                    );
+                }
+            }
         }
         Some(Command::Status) => {
             match session::load_latest() {
@@ -166,7 +215,7 @@ const SHELL_HOOK_SENTINEL: &str = "# --- resume shell hook ---";
 const SHELL_HOOK_ZSH: &str = "\
 # --- resume shell hook ---\n\
 _resume_preexec() {\n\
-    [[ -f .resume/session.json ]] || return\n\
+    [[ -f .resume/.active ]] || return\n\
     resume log-command \"$1\" 2>/dev/null &!\n\
 }\n\
 preexec_functions+=(_resume_preexec)\n\
@@ -176,7 +225,7 @@ finish() { resume stop \"$@\"; }\n\
 const SHELL_HOOK_BASH: &str = "\
 # --- resume shell hook ---\n\
 _resume_preexec() {\n\
-    [ -f .resume/session.json ] || return\n\
+    [ -f .resume/.active ] || return\n\
     [ \"${BASH_SUBSHELL}\" -eq 0 ] || return\n\
     resume log-command \"$BASH_COMMAND\" 2>/dev/null &\n\
 }\n\

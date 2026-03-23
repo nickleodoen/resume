@@ -9,8 +9,10 @@
 //   Hint / error line
 //
 // Commands:
-//   show    — fetch AI briefing, display in briefing area, stay in TUI
-//   finish  — archive current session, start fresh (does not exit)
+//   show          — fetch AI briefing, display in briefing area, stay in TUI
+//   finish        — archive current session, start fresh (does not exit)
+//   note <text>   — save a note for this project (persists across sessions)
+//   notes         — list all saved notes for this project
 //   ↑ ↓     — scroll briefing (PgUp / PgDn for faster scroll)
 //   Ctrl+C  — press twice within 1.5 s to exit
 
@@ -86,9 +88,11 @@ enum BriefingMsg {
 
 // ── Command result ────────────────────────────────────────────────────────────
 enum Cmd {
-    Finish,        // archive session, start fresh — stays in TUI
-    SpawnBriefing, // kick off API call
-    Stay,          // no-op
+    Finish,            // archive session, start fresh — stays in TUI
+    SpawnBriefing,     // kick off API call
+    SaveNote(String),  // persist a note for this project
+    ShowNotes,         // display all notes in the briefing area
+    Stay,              // no-op
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -138,9 +142,11 @@ impl App {
     }
 
     fn handle_command(&mut self) -> Cmd {
-        let cmd = self.input.trim().to_lowercase();
+        let raw = self.input.trim().to_string();
         self.input.clear();
-        match cmd.as_str() {
+        let lower = raw.to_lowercase();
+
+        match lower.as_str() {
             "show" => {
                 if std::env::var("ANTHROPIC_API_KEY").is_err() {
                     self.message = Some(
@@ -159,10 +165,26 @@ impl App {
                 }
             }
             "finish" => Cmd::Finish,
+            "notes" => Cmd::ShowNotes,
+            "note" => {
+                self.message = Some("Usage: note <text>".to_string());
+                Cmd::Stay
+            }
             "" => Cmd::Stay,
+            _ if lower.starts_with("note ") => {
+                let text = raw["note ".len()..].trim().to_string();
+                if text.is_empty() {
+                    self.message = Some("Usage: note <text>".to_string());
+                    Cmd::Stay
+                } else {
+                    Cmd::SaveNote(text)
+                }
+            }
             _ => {
-                self.message =
-                    Some("Unknown command — try `show` or `finish`".to_string());
+                self.message = Some(
+                    "Unknown command — try `show`, `finish`, `note <text>`, or `notes`"
+                        .to_string(),
+                );
                 Cmd::Stay
             }
         }
@@ -205,7 +227,8 @@ pub async fn run() -> Result<()> {
         tokio::spawn(async move {
             let result = async {
                 let sess = crate::session::load_latest()?;
-                crate::summarize::generate(&sess).await
+                let notes = crate::session::load_notes().unwrap_or_default();
+                crate::summarize::generate(&sess, &notes).await
             }
             .await;
             let _ = tx.send(BriefingMsg::Startup(result.map_err(|e| e.to_string())));
@@ -219,6 +242,7 @@ pub async fn run() -> Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture).ok();
     terminal.show_cursor().ok();
 
+    session::clear_sentinel();
     result?;
 
     let count = session::load().map(|s| s.events.len()).unwrap_or(0);
@@ -345,13 +369,63 @@ async fn run_loop(
                                             tokio::spawn(async move {
                                                 let result = async {
                                                     let sess = crate::session::load_latest()?;
-                                                    crate::summarize::generate(&sess).await
+                                                    let notes = crate::session::load_notes().unwrap_or_default();
+                                                    crate::summarize::generate(&sess, &notes).await
                                                 }
                                                 .await;
                                                 let _ = tx.send(BriefingMsg::UserRequested(
                                                     result.map_err(|e| e.to_string()),
                                                 ));
                                             });
+                                        }
+                                        Cmd::SaveNote(text) => {
+                                            match session::append_note(&text) {
+                                                Ok(()) => {
+                                                    app.message = Some(format!(
+                                                        "Note saved: \"{}\"",
+                                                        text
+                                                    ));
+                                                }
+                                                Err(e) => {
+                                                    app.message =
+                                                        Some(format!("note error: {e}"));
+                                                }
+                                            }
+                                        }
+                                        Cmd::ShowNotes => {
+                                            match session::load_notes() {
+                                                Ok(notes) if notes.is_empty() => {
+                                                    app.message = Some(
+                                                        "No notes yet — type `note <text>` to add one."
+                                                            .to_string(),
+                                                    );
+                                                }
+                                                Ok(notes) => {
+                                                    let text = notes
+                                                        .iter()
+                                                        .enumerate()
+                                                        .map(|(i, n)| {
+                                                            format!(
+                                                                "[{}] {}  {}",
+                                                                i + 1,
+                                                                n.timestamp
+                                                                    .format("%Y-%m-%d %H:%M"),
+                                                                n.text
+                                                            )
+                                                        })
+                                                        .collect::<Vec<_>>()
+                                                        .join("\n");
+                                                    app.briefing = Some(text);
+                                                    app.briefing_header =
+                                                        Some("Notes".to_string());
+                                                    app.scroll_offset = 0;
+                                                    app.message = None;
+                                                }
+                                                Err(e) => {
+                                                    app.message =
+                                                        Some(format!("notes error: {e}"));
+                                                }
+                                            }
                                         }
                                         Cmd::Stay => {}
                                     }
@@ -668,6 +742,20 @@ fn render_right(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 Style::default().fg(BRAND).add_modifier(Modifier::BOLD),
             ),
             Span::styled("save session, start fresh", Style::default().fg(GRAY)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "note    ",
+                Style::default().fg(BRAND).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("note <text> — save a note", Style::default().fg(GRAY)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "notes   ",
+                Style::default().fg(BRAND).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("list all saved notes", Style::default().fg(GRAY)),
         ]),
         Line::from(vec![
             Span::styled(
