@@ -325,6 +325,29 @@ pub fn log_command(cmd: &str) -> Result<()> {
     append_event(event)
 }
 
+/// Path for the global default model preference: ~/.resume/default_model
+pub fn default_model_path() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("could not find home directory")?;
+    let dir = home.join(".resume");
+    fs::create_dir_all(&dir).context("failed to create ~/.resume")?;
+    Ok(dir.join("default_model"))
+}
+
+/// Load the saved default model ID, if any.
+pub fn load_default_model() -> Option<String> {
+    default_model_path()
+        .ok()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Save the default model ID globally (persists across projects and sessions).
+pub fn save_default_model(model_id: &str) -> Result<()> {
+    let path = default_model_path()?;
+    fs::write(&path, model_id).context("failed to save default model")
+}
+
 /// Print a human-readable summary of captured events.
 pub fn print_status(sess: &Session) {
     println!("Project: {}", sess.project);

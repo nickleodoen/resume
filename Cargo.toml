@@ -21,3 +21,22 @@ dirs = "5"
 fs2 = "0.4"
 ratatui = "0.29"
 crossterm = "0.28"
+
+# ── Optional runtime dependencies ─────────────────────────────────────────────
+# Ollama is required for local model inference. resume works without it as long
+# as ANTHROPIC_API_KEY is set. Install Ollama, then pull the models below.
+#
+#   Install:  https://ollama.ai
+#   Models:   ollama pull qwen3.5
+#             ollama pull qwen3-coder:30b
+#             ollama pull deepseek-coder-v2:16b
+#
+# When packaging (Homebrew formula, install script, etc.) surface this prominently:
+#   - Check `which ollama` and offer to install if missing
+#   - Run `ollama pull` for the models the user selects
+#   - resume doctor (planned) will verify which models are reachable
+[package.metadata.optional-runtime.ollama]
+version = ">=0.3"
+url = "https://ollama.ai"
+purpose = "local model inference (no API key required)"
+models = ["qwen3.5", "qwen3-coder:30b", "deepseek-coder-v2:16b"]

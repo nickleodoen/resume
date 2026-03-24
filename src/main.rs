@@ -5,6 +5,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
 mod git;
+mod models;
 mod session;
 mod summarize;
 mod tui;
@@ -27,6 +28,15 @@ enum NotesAction {
     Clear,
     /// Open notes in $VISUAL or the system default editor
     Open,
+}
+
+#[derive(Subcommand)]
+enum ModelAction {
+    /// Set the default AI model used by resume
+    Default {
+        /// Model ID (e.g. deepseek-coder-v2:16b, claude-haiku-4-5-20251001)
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -68,6 +78,11 @@ enum Command {
     #[command(hide = true)]
     LogCommand {
         cmd: String,
+    },
+    /// Set model preferences (e.g. `resume model default deepseek-coder-v2:16b`)
+    Model {
+        #[command(subcommand)]
+        action: ModelAction,
     },
 }
 
@@ -122,7 +137,11 @@ async fn main() -> Result<()> {
         Some(Command::Show) => {
             let sess = session::load_latest()?;
             let notes_text = session::load_notes_text().unwrap_or_default();
-            let briefing = summarize::generate(&sess, &notes_text).await?;
+            let model = std::env::var("RESUME_MODEL")
+                .ok()
+                .or_else(|| session::load_default_model())
+                .unwrap_or_else(|| summarize::DEFAULT_MODEL.to_string());
+            let briefing = summarize::generate(&sess, &notes_text, &model).await?;
             println!("{}", briefing);
         }
         Some(Command::Note { text }) => {
@@ -152,6 +171,25 @@ async fn main() -> Result<()> {
                 .map(|ed| std::process::Command::new(&ed).arg(&path).spawn())
                 .unwrap_or_else(|| std::process::Command::new("open").arg(&path).spawn());
             spawned.context("failed to open editor")?;
+        }
+        Some(Command::Model { action: ModelAction::Default { name } }) => {
+            let matched = models::MODELS
+                .iter()
+                .find(|m| m.id == name || m.display_name.to_lowercase() == name.to_lowercase());
+            match matched {
+                Some(m) => {
+                    session::save_default_model(m.id)?;
+                    println!("Default model set to: {} ({})", m.id, m.display_name);
+                }
+                None => {
+                    eprintln!("Unknown model: {name}");
+                    eprintln!("Known models:");
+                    for m in models::MODELS {
+                        eprintln!("  {}  ({})", m.id, m.display_name);
+                    }
+                    std::process::exit(1);
+                }
+            }
         }
         Some(Command::Status) => {
             match session::load_latest() {

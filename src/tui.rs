@@ -36,6 +36,7 @@ use std::io;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
+use crate::models::{self, ModelInfo};
 use crate::session::{self, SessionEvent};
 use crate::watcher;
 
@@ -88,15 +89,39 @@ enum BriefingMsg {
     UserRequested(Result<String, String>),
 }
 
+// ── Help text ─────────────────────────────────────────────────────────────────
+const HELP_TEXT: &str = "\
+show                     get an AI briefing on this session
+finish                   save session, start fresh
+note <text>              save a note for this project
+notes                    list all saved notes
+notes open               open notes.txt in your editor
+notes clear              delete all notes
+model default <model>    set the default AI model
+
+Model IDs:
+  claude-haiku-4-5-20251001    Haiku           (Anthropic)
+  claude-sonnet-4-6            Sonnet          (Anthropic)
+  claude-opus-4-6              Opus            (Anthropic)
+  qwen3.5                      Qwen 3.5        (Ollama local)
+  qwen3-coder:30b              Qwen Coder 30B  (Ollama local)
+  deepseek-coder-v2:16b        DeepSeek V2 16B (Ollama local)
+
+Scroll: ↑ ↓ / PgUp PgDn / mouse wheel
+Shift+Tab: cycle available models
+Ctrl+C (twice): exit";
+
 // ── Command result ────────────────────────────────────────────────────────────
 enum Cmd {
-    Finish,           // archive session, start fresh — stays in TUI
-    SpawnBriefing,    // kick off API call
-    SaveNote(String), // persist a note for this project
-    ShowNotes,        // display all notes in the briefing area
-    ClearNotes,       // delete all notes for this project
-    OpenNotes,        // open notes.txt in $VISUAL / open (non-blocking)
-    Stay,             // no-op
+    Finish,                  // archive session, start fresh — stays in TUI
+    SpawnBriefing,           // kick off API call
+    SaveNote(String),        // persist a note for this project
+    ShowNotes,               // display all notes in the briefing area
+    ClearNotes,              // delete all notes for this project
+    OpenNotes,               // open notes.txt in $VISUAL / open (non-blocking)
+    SetDefaultModel(String), // save a model preference globally
+    ShowHelp,                // show help text in briefing area
+    Stay,                    // no-op
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -111,10 +136,12 @@ struct App {
     briefing_loading: bool,
     scroll_offset: u16,
     scroll_max: u16,
+    available_models: Vec<&'static ModelInfo>,
+    current_model_idx: usize,
 }
 
 impl App {
-    fn new(project: String) -> Self {
+    fn new(project: String, available_models: Vec<&'static ModelInfo>, current_model_idx: usize) -> Self {
         Self {
             events: Vec::new(),
             project,
@@ -126,7 +153,23 @@ impl App {
             briefing_loading: false,
             scroll_offset: 0,
             scroll_max: 0,
+            available_models,
+            current_model_idx,
         }
+    }
+
+    fn current_model(&self) -> &'static ModelInfo {
+        self.available_models
+            .get(self.current_model_idx)
+            .copied()
+            .unwrap_or(&models::MODELS[0])
+    }
+
+    fn cycle_model(&mut self) {
+        if self.available_models.is_empty() {
+            return;
+        }
+        self.current_model_idx = (self.current_model_idx + 1) % self.available_models.len();
     }
 
     fn push(&mut self, ev: SessionEvent) {
@@ -151,10 +194,11 @@ impl App {
         let lower = raw.to_lowercase();
 
         match lower.as_str() {
+            "help" | "--help" => Cmd::ShowHelp,
             "show" => {
-                if std::env::var("ANTHROPIC_API_KEY").is_err() {
+                if self.available_models.is_empty() {
                     self.message = Some(
-                        "ANTHROPIC_API_KEY is not set — export it and try again".to_string(),
+                        "No models available — set ANTHROPIC_API_KEY or start Ollama".to_string(),
                     );
                     Cmd::Stay
                 } else if self.briefing_loading {
@@ -177,6 +221,10 @@ impl App {
                 Cmd::Stay
             }
             "" => Cmd::Stay,
+            _ if lower.starts_with("model default ") => {
+                let name = raw["model default ".len()..].trim().to_string();
+                Cmd::SetDefaultModel(name)
+            }
             _ if lower.starts_with("note ") => {
                 let text = raw["note ".len()..].trim().to_string();
                 if text.is_empty() {
@@ -207,6 +255,20 @@ pub async fn run() -> Result<()> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "unknown".to_string());
 
+    // Check which models are reachable before entering the TUI.
+    // Ollama check is fast (connection refused is near-instant).
+    let ollama_pulled = models::ollama_pulled_ids().await;
+    let available = models::filter_available(&ollama_pulled);
+    // Priority: RESUME_MODEL env var → saved default → deepseek → haiku → first available.
+    let saved_default = session::load_default_model();
+    let start_idx = std::env::var("RESUME_MODEL")
+        .ok()
+        .and_then(|id| available.iter().position(|m| m.id == id))
+        .or_else(|| saved_default.as_deref().and_then(|id| available.iter().position(|m| m.id == id)))
+        .or_else(|| available.iter().position(|m| m.id.starts_with("deepseek")))
+        .or_else(|| available.iter().position(|m| m.id.starts_with("claude-haiku")))
+        .unwrap_or(0);
+
     let (watcher_tx, mut watcher_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let (briefing_tx, mut briefing_rx) = mpsc::unbounded_channel::<BriefingMsg>();
@@ -224,17 +286,18 @@ pub async fn run() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("failed to create terminal")?;
 
-    let mut app = App::new(project);
+    let mut app = App::new(project, available, start_idx);
 
-    // Auto-fetch briefing from the previous session immediately on startup.
-    if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+    // Auto-fetch briefing from the previous session on startup if a model is ready.
+    if !app.available_models.is_empty() {
         app.briefing_loading = true;
         let tx = briefing_tx.clone();
+        let model_id = app.current_model().id;
         tokio::spawn(async move {
             let result = async {
                 let sess = crate::session::load_latest()?;
                 let notes_text = crate::session::load_notes_text().unwrap_or_default();
-                crate::summarize::generate(&sess, &notes_text).await
+                crate::summarize::generate(&sess, &notes_text, model_id).await
             }
             .await;
             let _ = tx.send(BriefingMsg::Startup(result.map_err(|e| e.to_string())));
@@ -332,6 +395,10 @@ async fn run_loop(
                         }
                         Ok(CEvent::Key(key)) => {
                             match key.code {
+                                KeyCode::BackTab => {
+                                    app.cycle_model();
+                                    app.message = None;
+                                }
                                 KeyCode::Char('c')
                                     if key.modifiers.contains(KeyModifiers::CONTROL) =>
                                 {
@@ -372,11 +439,12 @@ async fn run_loop(
                                         }
                                         Cmd::SpawnBriefing => {
                                             let tx = briefing_tx.clone();
+                                            let model_id = app.current_model().id;
                                             tokio::spawn(async move {
                                                 let result = async {
                                                     let sess = crate::session::load_latest()?;
                                                     let notes_text = crate::session::load_notes_text().unwrap_or_default();
-                                                    crate::summarize::generate(&sess, &notes_text).await
+                                                    crate::summarize::generate(&sess, &notes_text, model_id).await
                                                 }
                                                 .await;
                                                 let _ = tx.send(BriefingMsg::UserRequested(
@@ -472,6 +540,54 @@ async fn run_loop(
                                                 }
                                             }
                                         }
+                                        Cmd::SetDefaultModel(name) => {
+                                            let found = app
+                                                .available_models
+                                                .iter()
+                                                .enumerate()
+                                                .find(|(_, m)| {
+                                                    m.id == name
+                                                        || m.display_name.to_lowercase()
+                                                            == name.to_lowercase()
+                                                });
+                                            match found {
+                                                Some((idx, m)) => {
+                                                    let model_id = m.id;
+                                                    match session::save_default_model(model_id) {
+                                                        Ok(()) => {
+                                                            app.current_model_idx = idx;
+                                                            app.message = Some(format!(
+                                                                "Default model set to: {}",
+                                                                m.display_name
+                                                            ));
+                                                        }
+                                                        Err(e) => {
+                                                            app.message = Some(format!(
+                                                                "failed to save default: {e}"
+                                                            ));
+                                                        }
+                                                    }
+                                                }
+                                                None => {
+                                                    let known = models::MODELS.iter().any(|m| {
+                                                        m.id == name
+                                                            || m.display_name.to_lowercase()
+                                                                == name.to_lowercase()
+                                                    });
+                                                    app.message = Some(if known {
+                                                        format!("'{name}' is not currently available — is Ollama running?")
+                                                    } else {
+                                                        format!("Unknown model: {name}  (type `help` for model IDs)")
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        Cmd::ShowHelp => {
+                                            app.briefing = Some(HELP_TEXT.to_string());
+                                            app.briefing_header = Some("Help".to_string());
+                                            app.scroll_offset = 0;
+                                            app.message = None;
+                                        }
                                         Cmd::Stay => {}
                                     }
                                 }
@@ -535,7 +651,7 @@ fn estimate_content_rows(app: &App, area_width: u16) -> u16 {
 fn render(f: &mut ratatui::Frame, app: &mut App) {
     let area = f.area();
     let box_height = (RESY_H as u16) + 5 + 2;
-    let cmd_bar_rows = 4u16; // sep + input + sep + hint
+    let cmd_bar_rows = 5u16; // sep + input + sep + hint + model bar
 
     let available = area.height
         .saturating_sub(box_height)
@@ -559,12 +675,14 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
     //   [2] sep          — 1
     //   [3] input        — 1  (command bar)
     //   [4] sep          — 1
-    //   [5] hint/error   — 1
-    //   [6] trailing     — Min(0) spacer when fits, Length(0) dummy when overflows
+    //   [5] model bar    — 1  (shift+tab indicator — always visible)
+    //   [6] hint/error   — 1
+    //   [7] trailing     — Min(0) spacer when fits, Length(0) dummy when overflows
     let chunks = if fits {
         Layout::vertical([
             Constraint::Length(box_height),
             Constraint::Length(content_h),
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -575,6 +693,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
         Layout::vertical([
             Constraint::Length(box_height),
             Constraint::Min(0),
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -631,6 +750,28 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
         chunks[4],
     );
 
+    // ── Model indicator ───────────────────────────────────────────────────────
+    {
+        let model = app.current_model();
+        let provider_color = match model.provider {
+            models::Provider::Anthropic => BRAND,
+            models::Provider::Ollama => Color::Green,
+        };
+        let suffix = if app.available_models.len() > 1 {
+            "  (shift+tab to cycle)"
+        } else {
+            ""
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("  >> ", Style::default().fg(provider_color).add_modifier(Modifier::BOLD)),
+                Span::styled(model.display_name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(suffix, Style::default().fg(GRAY)),
+            ])),
+            chunks[5],
+        );
+    }
+
     // ── Hint / error ──────────────────────────────────────────────────────────
     if let Some(msg) = &app.message {
         f.render_widget(
@@ -638,7 +779,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
                 Span::raw("  "),
                 Span::styled(msg.clone(), Style::default().fg(GRAY)),
             ])),
-            chunks[5],
+            chunks[6],
         );
     }
 
