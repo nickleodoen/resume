@@ -1,6 +1,6 @@
 # resume
 
-Never lose context between coding sessions.
+Keep your developer flow state. Never lose context between coding sessions. Dive right back.
 
 `resume` watches your project while you work — file changes, git diffs, shell commands —
 and stores them locally. When you come back, one command calls an LLM and prints a
