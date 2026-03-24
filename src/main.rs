@@ -76,7 +76,7 @@ enum Command {
     },
     /// Append a shell command to the session log (called by the shell hook)
     #[command(hide = true)]
-    LogCommand {
+    Log {
         cmd: String,
     },
     /// Set model preferences (e.g. `resume model default deepseek-coder-v2:16b`)
@@ -88,6 +88,10 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load .env from the current directory if present (e.g. ANTHROPIC_API_KEY).
+    // Silently ignored if the file doesn't exist.
+    dotenvy::dotenv().ok();
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -106,7 +110,7 @@ async fn main() -> Result<()> {
         Some(Command::New { install_hook }) => {
             init_project(install_hook)?;
         }
-        Some(Command::LogCommand { cmd }) => {
+        Some(Command::Log { cmd }) => {
             // Silent — called by the shell hook in a background job.
             session::log_command(&cmd)?;
         }
@@ -138,7 +142,7 @@ async fn main() -> Result<()> {
             let sess = session::load_latest()?;
             let model = std::env::var("RESUME_MODEL")
                 .ok()
-                .or_else(|| session::load_default_model())
+                .or_else(session::load_default_model)
                 .unwrap_or_else(|| summarize::DEFAULT_MODEL.to_string());
             let briefing = summarize::generate(&sess, &model).await?;
             println!("{}", briefing);

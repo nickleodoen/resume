@@ -19,6 +19,7 @@ chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
 dirs = "5"
 fs2 = "0.4"
+dotenvy = "0.15"
 ratatui = "0.29"
 crossterm = "0.28"
 

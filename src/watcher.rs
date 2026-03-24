@@ -127,11 +127,10 @@ pub async fn watch(
                     if let Some(desc) = describe_event(&event, &cwd_clone) {
                         // Debounce: skip if this path was logged within the window.
                         let now = Instant::now();
-                        if let Some(last) = last_seen.get(&desc) {
-                            if now.duration_since(*last) < Duration::from_secs(DEBOUNCE_SECS) {
+                        if let Some(last) = last_seen.get(&desc)
+                            && now.duration_since(*last) < Duration::from_secs(DEBOUNCE_SECS) {
                                 continue;
                             }
-                        }
                         last_seen.insert(desc.clone(), now);
 
                         let ev = SessionEvent::new(EventType::FileChange, desc);

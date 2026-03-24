@@ -182,8 +182,8 @@ fn build_prompt(
     lines.push(String::new());
 
     // ── Current uncommitted diff (highest priority) ───────────────────────────
-    if let Some(diff) = current_diff {
-        if !diff.is_empty() {
+    if let Some(diff) = current_diff
+        && !diff.is_empty() {
             let capped = if diff.len() > MAX_CURRENT_DIFF_BYTES {
                 let cut = diff[..MAX_CURRENT_DIFF_BYTES]
                     .rfind('\n')
@@ -200,7 +200,6 @@ fn build_prompt(
             lines.push(capped);
             lines.push(String::new());
         }
-    }
 
     // ── Commits this session ──────────────────────────────────────────────────
     // Primary source: git_log_since() — authoritative at show time.

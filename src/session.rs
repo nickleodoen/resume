@@ -148,11 +148,10 @@ fn prune_archives(keep: usize) -> Result<()> {
 /// Load the most recent session that has events.
 /// Checks the current session first, then archives newest-first.
 pub fn load_latest() -> Result<Session> {
-    if let Ok(sess) = load() {
-        if !sess.events.is_empty() {
+    if let Ok(sess) = load()
+        && !sess.events.is_empty() {
             return Ok(sess);
         }
-    }
     let dir = sessions_dir()?;
     let mut entries: Vec<PathBuf> = fs::read_dir(&dir)
         .context("failed to read sessions dir")?
@@ -161,13 +160,11 @@ pub fn load_latest() -> Result<Session> {
         .collect();
     entries.sort();
     for path in entries.into_iter().rev() {
-        if let Ok(json) = fs::read_to_string(&path) {
-            if let Ok(sess) = serde_json::from_str::<Session>(&json) {
-                if !sess.events.is_empty() {
+        if let Ok(json) = fs::read_to_string(&path)
+            && let Ok(sess) = serde_json::from_str::<Session>(&json)
+                && !sess.events.is_empty() {
                     return Ok(sess);
                 }
-            }
-        }
     }
     anyhow::bail!("No sessions with events found. Run `resume` to start a session.");
 }

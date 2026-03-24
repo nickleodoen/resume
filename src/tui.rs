@@ -419,14 +419,13 @@ async fn run_loop(
             }
             _ = tokio::time::sleep(tick) => {
                 // Expire the double-Ctrl+C window.
-                if let Some(t) = last_ctrl_c {
-                    if t.elapsed() >= Duration::from_millis(1500) {
+                if let Some(t) = last_ctrl_c
+                    && t.elapsed() >= Duration::from_millis(1500) {
                         last_ctrl_c = None;
                         if matches!(app.message.as_deref(), Some("Press Ctrl+C again to exit")) {
                             app.message = None;
                         }
                     }
-                }
 
                 while event::poll(Duration::ZERO).unwrap_or(false) {
                     match event::read() {
@@ -452,7 +451,7 @@ async fn run_loop(
                                     if key.modifiers.contains(KeyModifiers::CONTROL) =>
                                 {
                                     let now = Instant::now();
-                                    if last_ctrl_c.map_or(false, |t| {
+                                    if last_ctrl_c.is_some_and(|t| {
                                         now.duration_since(t) < Duration::from_millis(1500)
                                     }) {
                                         if let Some(tx) = shutdown_tx.take() {
@@ -699,7 +698,7 @@ fn estimate_content_rows(app: &App, area_width: u16) -> u16 {
         }
         for line in briefing.lines() {
             let len = line.len() + 2; // +2 for "  " indent
-            rows += ((len + avail - 1) / avail).max(1) as u16;
+            rows += len.div_ceil(avail).max(1) as u16;
         }
         rows + 2 // safety margin: byte-length != display-width for unicode, and wrapping estimates can be off
     } else {

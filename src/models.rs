@@ -28,7 +28,7 @@ pub struct ModelInfo {
     /// Short human-readable name for the model indicator bar
     pub display_name: &'static str,
     pub provider: Provider,
-    /// One-line description shown in the model-switcher (used by future tooltip/help UI)
+    /// One-line description for future tooltip/help UI — not yet wired up.
     #[allow(dead_code)]
     pub description: &'static str,
     /// How long to wait for a briefing response before giving up.
