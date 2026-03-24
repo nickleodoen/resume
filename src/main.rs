@@ -136,12 +136,11 @@ async fn main() -> Result<()> {
         }
         Some(Command::Show) => {
             let sess = session::load_latest()?;
-            let notes_text = session::load_notes_text().unwrap_or_default();
             let model = std::env::var("RESUME_MODEL")
                 .ok()
                 .or_else(|| session::load_default_model())
                 .unwrap_or_else(|| summarize::DEFAULT_MODEL.to_string());
-            let briefing = summarize::generate(&sess, &notes_text, &model).await?;
+            let briefing = summarize::generate(&sess, &model).await?;
             println!("{}", briefing);
         }
         Some(Command::Note { text }) => {

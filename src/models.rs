@@ -31,6 +31,9 @@ pub struct ModelInfo {
     /// One-line description shown in the model-switcher (used by future tooltip/help UI)
     #[allow(dead_code)]
     pub description: &'static str,
+    /// How long to wait for a briefing response before giving up.
+    /// Larger local models need more time than fast cloud APIs.
+    pub timeout_secs: u64,
 }
 
 // ── Model list ────────────────────────────────────────────────────────────────
@@ -42,18 +45,21 @@ pub const MODELS: &[ModelInfo] = &[
         display_name: "Haiku",
         provider: Provider::Anthropic,
         description: "Fast · cheap · great for quick briefings",
+        timeout_secs: 30,
     },
     ModelInfo {
         id: "claude-sonnet-4-6",
         display_name: "Sonnet",
         provider: Provider::Anthropic,
         description: "Balanced quality and cost",
+        timeout_secs: 60,
     },
     ModelInfo {
         id: "claude-opus-4-6",
         display_name: "Opus",
         provider: Provider::Anthropic,
         description: "Best quality · higher cost",
+        timeout_secs: 60,
     },
     // ── Ollama (local) ────────────────────────────────────────────────────────
     ModelInfo {
@@ -61,18 +67,21 @@ pub const MODELS: &[ModelInfo] = &[
         display_name: "Qwen 3.5",
         provider: Provider::Ollama,
         description: "Local · fast general-purpose",
+        timeout_secs: 90,
     },
     ModelInfo {
         id: "qwen3-coder:30b",
         display_name: "Qwen Coder 30B",
         provider: Provider::Ollama,
         description: "Local · strong code understanding",
+        timeout_secs: 300,
     },
     ModelInfo {
         id: "deepseek-coder-v2:16b",
         display_name: "DeepSeek Coder V2 16B",
         provider: Provider::Ollama,
         description: "Local · code-focused",
+        timeout_secs: 180,
     },
 ];
 

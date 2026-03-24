@@ -92,11 +92,13 @@ enum BriefingMsg {
 // ── Help text ─────────────────────────────────────────────────────────────────
 const HELP_TEXT: &str = "\
 show                     get an AI briefing on this session
+cancel                   cancel an in-progress briefing generation
 finish                   save session, start fresh
 note <text>              save a note for this project
 notes                    list all saved notes
 notes open               open notes.txt in your editor
 notes clear              delete all notes
+model default            show the current default model
 model default <model>    set the default AI model
 
 Model IDs:
@@ -115,6 +117,7 @@ Ctrl+C (twice): exit";
 enum Cmd {
     Finish,                  // archive session, start fresh — stays in TUI
     SpawnBriefing,           // kick off API call
+    CancelBriefing,          // abort in-flight API call, return to idle
     SaveNote(String),        // persist a note for this project
     ShowNotes,               // display all notes in the briefing area
     ClearNotes,              // delete all notes for this project
@@ -134,9 +137,11 @@ struct App {
     briefing: Option<String>,
     briefing_header: Option<String>,
     briefing_loading: bool,
-    // Cache: briefing text + event count at generation time.
-    // Invalidated when events.len() grows (new file/git activity).
-    cached_briefing: Option<(String, usize)>,
+    // Cache: briefing text + event count + model ID at generation time.
+    // Invalidated when events.len() grows (new activity) or model changes.
+    cached_briefing: Option<(String, usize, &'static str)>,
+    // Handle to the in-flight briefing task; abort()-ed on cancel.
+    briefing_task: Option<tokio::task::JoinHandle<()>>,
     scroll_offset: u16,
     scroll_max: u16,
     available_models: Vec<&'static ModelInfo>,
@@ -155,6 +160,7 @@ impl App {
             briefing_header: None,
             briefing_loading: false,
             cached_briefing: None,
+            briefing_task: None,
             scroll_offset: 0,
             scroll_max: 0,
             available_models,
@@ -199,6 +205,7 @@ impl App {
 
         match lower.as_str() {
             "help" | "--help" => Cmd::ShowHelp,
+            "cancel" => Cmd::CancelBriefing,
             "show" => {
                 if self.available_models.is_empty() {
                     self.message = Some(
@@ -208,9 +215,9 @@ impl App {
                 } else if self.briefing_loading {
                     self.message = Some("Already generating a briefing…".to_string());
                     Cmd::Stay
-                } else if let Some((text, event_count)) = &self.cached_briefing {
-                    // Cache hit: serve instantly if no new events since generation.
-                    if *event_count == self.events.len() {
+                } else if let Some((text, event_count, model_id)) = &self.cached_briefing {
+                    // Cache hit: serve instantly if no new events and same model.
+                    if *event_count == self.events.len() && *model_id == self.current_model().id {
                         self.briefing = Some(text.clone());
                         self.briefing_header = Some("Briefing".to_string());
                         self.scroll_offset = 0;
@@ -241,6 +248,23 @@ impl App {
                 Cmd::Stay
             }
             "" => Cmd::Stay,
+            "model default" => {
+                let saved = session::load_default_model();
+                let current = self.current_model();
+                let msg = match saved {
+                    Some(id) => format!(
+                        "Default model: {} ({})",
+                        id,
+                        if id == current.id { "active" } else { "not active — override in effect" }
+                    ),
+                    None => format!(
+                        "No default set — using {} (auto-selected)",
+                        current.display_name
+                    ),
+                };
+                self.message = Some(msg);
+                Cmd::Stay
+            }
             _ if lower.starts_with("model default ") => {
                 let name = raw["model default ".len()..].trim().to_string();
                 Cmd::SetDefaultModel(name)
@@ -313,15 +337,17 @@ pub async fn run() -> Result<()> {
         app.briefing_loading = true;
         let tx = briefing_tx.clone();
         let model_id = app.current_model().id;
-        tokio::spawn(async move {
-            let result = async {
+        let timeout_secs = app.current_model().timeout_secs;
+        let handle = tokio::spawn(async move {
+            let result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
                 let sess = crate::session::load_latest()?;
-                let notes_text = crate::session::load_notes_text().unwrap_or_default();
-                crate::summarize::generate(&sess, &notes_text, model_id).await
-            }
-            .await;
+                crate::summarize::generate(&sess, model_id).await
+            })
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("briefing timed out after {timeout_secs} s")));
             let _ = tx.send(BriefingMsg::Startup(result.map_err(|e| e.to_string())));
         });
+        app.briefing_task = Some(handle);
     }
 
     let result =
@@ -368,9 +394,10 @@ async fn run_loop(
             maybe_briefing = briefing_rx.recv() => {
                 if let Some(msg) = maybe_briefing {
                     app.briefing_loading = false;
+                    app.briefing_task = None;
                     match msg {
                         BriefingMsg::Startup(Ok(text)) => {
-                            app.cached_briefing = Some((text.clone(), app.events.len()));
+                            app.cached_briefing = Some((text.clone(), app.events.len(), app.current_model().id));
                             app.briefing = Some(text);
                             app.briefing_header = Some("Briefing".to_string());
                             app.scroll_offset = 0;
@@ -379,7 +406,7 @@ async fn run_loop(
                             // No previous session or API error on startup — silent.
                         }
                         BriefingMsg::UserRequested(Ok(text)) => {
-                            app.cached_briefing = Some((text.clone(), app.events.len()));
+                            app.cached_briefing = Some((text.clone(), app.events.len(), app.current_model().id));
                             app.briefing = Some(text);
                             app.briefing_header = Some("Briefing".to_string());
                             app.scroll_offset = 0;
@@ -463,17 +490,28 @@ async fn run_loop(
                                         Cmd::SpawnBriefing => {
                                             let tx = briefing_tx.clone();
                                             let model_id = app.current_model().id;
-                                            tokio::spawn(async move {
-                                                let result = async {
+                                            let timeout_secs = app.current_model().timeout_secs;
+                                            let handle = tokio::spawn(async move {
+                                                let result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
                                                     let sess = crate::session::load_latest()?;
-                                                    let notes_text = crate::session::load_notes_text().unwrap_or_default();
-                                                    crate::summarize::generate(&sess, &notes_text, model_id).await
-                                                }
-                                                .await;
+                                                    crate::summarize::generate(&sess, model_id).await
+                                                })
+                                                .await
+                                                .unwrap_or_else(|_| Err(anyhow::anyhow!("briefing timed out after {timeout_secs} s")));
                                                 let _ = tx.send(BriefingMsg::UserRequested(
                                                     result.map_err(|e| e.to_string()),
                                                 ));
                                             });
+                                            app.briefing_task = Some(handle);
+                                        }
+                                        Cmd::CancelBriefing => {
+                                            if let Some(handle) = app.briefing_task.take() {
+                                                handle.abort();
+                                            }
+                                            app.briefing_loading = false;
+                                            app.briefing = None;
+                                            app.briefing_header = None;
+                                            app.message = Some("Briefing cancelled.".to_string());
                                         }
                                         Cmd::ClearNotes => {
                                             match session::clear_notes() {
@@ -863,7 +901,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
             // Pre-wrap at word boundaries so each chunk gets its own "  " indent.
             // Without this, ratatui wraps long Lines but only the first row gets
             // the leading indent span — continuation rows start at column 0.
-            let mut s = line;
+            let mut s = line.trim();
             loop {
                 if s.len() <= text_w {
                     feed.push(Line::from(vec![

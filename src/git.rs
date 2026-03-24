@@ -2,7 +2,8 @@
 // (staged + unstaged changes) and returns it as a string for session logging.
 
 use anyhow::{Context, Result};
-use git2::{DiffOptions, Repository};
+use chrono::{DateTime, Utc};
+use git2::{DiffOptions, Repository, Sort};
 
 /// Return the current HEAD commit hash, or empty string if none.
 pub fn head_hash(path: &std::path::Path) -> String {
@@ -28,6 +29,43 @@ pub fn latest_commit_message(path: &std::path::Path) -> String {
         .and_then(|h| h.peel_to_commit().ok())
         .and_then(|c| c.summary().map(|s| s.to_string()))
         .unwrap_or_default()
+}
+
+/// Return commits made since `since`, oldest-first, as (short_hash, HH:MM, subject) tuples.
+/// Returns an empty vec if the repo has no commits, is unreachable, or `since` is in the future.
+pub fn git_log_since(path: &std::path::Path, since: &DateTime<Utc>) -> Vec<(String, String, String)> {
+    let repo = match Repository::discover(path) {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+    let mut revwalk = match repo.revwalk() {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+    if revwalk.push_head().is_err() {
+        return vec![];
+    }
+    revwalk.set_sorting(Sort::TIME).ok();
+
+    let since_ts = since.timestamp();
+    let mut commits = Vec::new();
+    for oid in revwalk.flatten() {
+        let commit = match repo.find_commit(oid) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if commit.time().seconds() < since_ts {
+            break; // revwalk is newest-first; stop once we're before the session
+        }
+        let hash = commit.id().to_string()[..7].to_string();
+        let time = DateTime::from_timestamp(commit.time().seconds(), 0)
+            .map(|t| t.format("%H:%M").to_string())
+            .unwrap_or_default();
+        let subject = commit.summary().unwrap_or("(no message)").to_string();
+        commits.push((hash, time, subject));
+    }
+    commits.reverse(); // return oldest-first
+    commits
 }
 
 /// Return a unified diff of all uncommitted changes in the repo at `path`.
