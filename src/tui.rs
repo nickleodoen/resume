@@ -640,7 +640,7 @@ fn estimate_content_rows(app: &App, area_width: u16) -> u16 {
             let len = line.len() + 2; // +2 for "  " indent
             rows += ((len + avail - 1) / avail).max(1) as u16;
         }
-        rows
+        rows + 2 // safety margin: byte-length != display-width for unicode, and wrapping estimates can be off
     } else {
         0
     }
@@ -902,7 +902,6 @@ fn render_right(f: &mut ratatui::Frame, app: &App, area: Rect) {
     f.render_widget(block, area);
 
     let count = app.events.len();
-    let elapsed = app.elapsed();
     let sep_width = inner.width.saturating_sub(1) as usize;
 
     let lines: Vec<Line> = vec![
@@ -945,19 +944,23 @@ fn render_right(f: &mut ratatui::Frame, app: &App, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled(
+                "help    ",
+                Style::default().fg(BRAND).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("for help and available models", Style::default().fg(GRAY)),
+        ]),
+        Line::from(vec![
+            Span::styled(
                 "Ctrl+C  ",
                 Style::default().fg(BRAND).add_modifier(Modifier::BOLD),
             ),
             Span::styled("press twice to exit", Style::default().fg(GRAY)),
         ]),
         Line::raw(""),
-        Line::from(vec![
-            Span::styled(
-                format!("{count} event{}", if count == 1 { "" } else { "s" }),
-                Style::default().fg(GRAY),
-            ),
-            Span::styled(format!("  ·  {elapsed}"), Style::default().fg(BRAND_DIM)),
-        ]),
+        Line::from(Span::styled(
+            format!("{count} event{}", if count == 1 { "" } else { "s" }),
+            Style::default().fg(GRAY),
+        )),
     ];
 
     f.render_widget(Paragraph::new(lines), inner);
