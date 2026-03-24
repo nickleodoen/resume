@@ -351,7 +351,7 @@ async fn run_loop(
                     match msg {
                         BriefingMsg::Startup(Ok(text)) => {
                             app.briefing = Some(text);
-                            app.briefing_header = Some("Previous session".to_string());
+                            app.briefing_header = Some("Briefing".to_string());
                             app.scroll_offset = 0;
                         }
                         BriefingMsg::Startup(Err(_)) => {
@@ -824,11 +824,38 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
             ]));
         }
         feed.push(Line::raw(""));
+        const SECTION_HEADERS: &[&str] = &["Working on", "Progress", "Next step"];
+        let text_w = (feed_area.width.saturating_sub(4) as usize).max(1);
         for line in briefing.lines() {
-            feed.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(line.to_string(), Style::default().fg(Color::White)),
-            ]));
+            if line.is_empty() {
+                feed.push(Line::raw(""));
+                continue;
+            }
+            let is_header = SECTION_HEADERS.contains(&line.trim());
+            let style = if is_header {
+                Style::default().fg(BRAND).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            // Pre-wrap at word boundaries so each chunk gets its own "  " indent.
+            // Without this, ratatui wraps long Lines but only the first row gets
+            // the leading indent span — continuation rows start at column 0.
+            let mut s = line;
+            loop {
+                if s.len() <= text_w {
+                    feed.push(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(s.to_string(), style),
+                    ]));
+                    break;
+                }
+                let break_at = s[..text_w].rfind(' ').unwrap_or(text_w);
+                feed.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(s[..break_at].to_string(), style),
+                ]));
+                s = s[break_at..].trim_start_matches(' ');
+            }
         }
     }
 

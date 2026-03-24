@@ -32,20 +32,19 @@ pub const DEFAULT_MODEL: &str = "claude-haiku-4-5-20251001";
 const SYSTEM_PROMPT: &str = "\
 You are an expert developer assistant helping engineers pick up where they left off.\n\
 Given a session log of shell commands, file changes, git diffs, and optional developer notes, \
-produce a structured briefing with exactly these four sections:\n\n\
-**What I was working on**\n\
-One or two sentences naming the feature, bug, or task. Be specific — use actual file names and \
-function/component names from the log.\n\n\
-**Progress made**\n\
-Bullet points (2–4) of concrete things that were completed or changed this session.\n\n\
-**Where I left off**\n\
-One sentence describing the exact state of things at the end of the session — what was in flight, \
-what was broken, or what was about to happen next.\n\n\
-**Recommended next step**\n\
-One actionable sentence telling the developer exactly what to do first when they sit back down.\n\n\
-Rules: be concrete, use real names from the log, skip generic filler, keep total output under 200 words. \
-If developer notes are present, treat them as high-priority context — they capture intent and decisions \
-that may not be visible in file changes alone.";
+produce a structured briefing with exactly these three sections:\n\n\
+Working on\n\
+One sentence naming the feature, bug, or task. Use actual file names and function/component names from the log.\n\n\
+Progress\n\
+Bullet points (2-4) of concrete things completed or changed this session. Start each with '- '.\n\n\
+Next step\n\
+One actionable sentence with the exact command or file to open first.\n\n\
+Rules:\n\
+- Output plain text only — no markdown, no asterisks, no bold syntax\n\
+- Use real names from the log, skip generic filler\n\
+- Keep total output under 120 words\n\
+- Section headers are bare words on their own line, nothing else\n\
+- If developer notes are present, treat them as high-priority context";
 
 // ── Anthropic types ───────────────────────────────────────────────────────────
 
