@@ -715,7 +715,7 @@ fn render(f: &mut ratatui::Frame, app: &mut App) {
     f.render_widget(box_block, chunks[0]);
 
     let panels = Layout::horizontal([
-        Constraint::Length(30),
+        Constraint::Length(34),
         Constraint::Min(0),
     ])
     .split(inner);
@@ -866,7 +866,11 @@ fn render_left(f: &mut ratatui::Frame, app: &App, area: Rect) {
             "resume",
             Style::default().fg(BRAND).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!("  ·  {}", app.elapsed()), Style::default().fg(GRAY)),
+        Span::styled(format!(" · {}", app.elapsed()), Style::default().fg(GRAY)),
+        Span::styled(
+            format!(" · {} event{}", app.events.len(), if app.events.len() == 1 { "" } else { "s" }),
+            Style::default().fg(GRAY),
+        ),
     ]));
 
     let cwd_display = std::env::current_dir()
@@ -894,14 +898,13 @@ fn render_left(f: &mut ratatui::Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
-fn render_right(f: &mut ratatui::Frame, app: &App, area: Rect) {
+fn render_right(f: &mut ratatui::Frame, _app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::LEFT)
         .border_style(Style::default().fg(GRAY));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let count = app.events.len();
     let sep_width = inner.width.saturating_sub(1) as usize;
 
     let lines: Vec<Line> = vec![
@@ -956,11 +959,6 @@ fn render_right(f: &mut ratatui::Frame, app: &App, area: Rect) {
             ),
             Span::styled("press twice to exit", Style::default().fg(GRAY)),
         ]),
-        Line::raw(""),
-        Line::from(Span::styled(
-            format!("{count} event{}", if count == 1 { "" } else { "s" }),
-            Style::default().fg(GRAY),
-        )),
     ];
 
     f.render_widget(Paragraph::new(lines), inner);
