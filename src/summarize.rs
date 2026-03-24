@@ -40,13 +40,16 @@ Focus on what it does for the user or developer, not implementation details.\n\n
 Progress\n\
 Bullet points (2-4) of what was actually accomplished this session. Start each with '- '. \
 Write like a changelog: 'Added X', 'Fixed Y', 'Removed Z'. \
-Name the capability or behavior, not the function or struct that implements it.\n\n\
+Name the capability or behavior, not the function or struct that implements it. \
+After each bullet, append the primary filename in parentheses, e.g. '(src/summarize.rs)'. \
+If changes spanned more than one file, append the primary file plus a pill like '(src/summarize.rs +2 more)'.\n\n\
 Next step\n\
-One actionable sentence describing the next task in plain English.\n\n\
+One actionable sentence describing the next task in plain English. \
+If it involves a specific file, end with the filename in parentheses, e.g. '(src/tui.rs)'.\n\n\
 Rules:\n\
 - Output plain text only — no markdown, no asterisks, no bold syntax\n\
 - Section headers are bare words on their own line, nothing else\n\
-- Keep total output under 120 words\n\
+- Keep total output under 140 words\n\
 - NEVER mention function names, struct fields, parameter names, or type names\n\
 - NEVER say things like 'updated X() to accept Y parameter' or 'removed Z field'\n\
 - DO say things like 'Added per-model timeout support', 'Removed notes from briefing context'\n\
@@ -441,8 +444,34 @@ pub async fn generate(sess: &Session, model_id: &str) -> Result<String> {
     let prompt = build_prompt(sess, current_diff, commits, file_snippets, claude_messages);
     let user_content = format!("Here is my session log:\n\n{}", prompt);
 
-    match models::provider_for(model_id) {
+    let raw = match models::provider_for(model_id) {
         Provider::Anthropic => call_anthropic(model_id, &user_content).await,
         Provider::Ollama => call_ollama(model_id, &user_content).await,
+    }?;
+    Ok(normalize_briefing(&raw))
+}
+
+/// Normalize briefing text so section headers are always immediately followed by
+/// their content, with no intervening blank line. Different models emit different
+/// amounts of whitespace; this makes the output look the same regardless of model.
+fn normalize_briefing(text: &str) -> String {
+    const HEADERS: &[&str] = &["Working on", "Progress", "Next step"];
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = Vec::with_capacity(lines.len());
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        out.push(line);
+        // If this line is a section header, skip any immediately following blank lines
+        if HEADERS.iter().any(|h| line.trim() == *h) {
+            let mut j = i + 1;
+            while j < lines.len() && lines[j].trim().is_empty() {
+                j += 1;
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
     }
+    out.join("\n")
 }
