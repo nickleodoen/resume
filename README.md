@@ -1,4 +1,4 @@
-# resume
+# 🪼 Resume - Coder Session AI Assistant
 
 Keep your developer flow state. Never lose context between coding sessions. Dive right back.
 
