@@ -6,6 +6,22 @@ Keep your developer flow state. Never lose context between coding sessions. Dive
 and stores them locally. When you come back, one command calls an LLM and prints a
 plain-English briefing of what you were doing, what you finished, and what to do next.
 
+<p align="center">
+  <img src="assets/resy.png" width="120" alt="Resy the jellyfish" />
+</p>
+
+---
+
+## Screenshots
+
+| Dashboard | Briefing |
+|:---:|:---:|
+| ![Dashboard](assets/vscode.png) | ![Briefing](assets/briefing.png) |
+
+| Help & Models | Notes |
+|:---:|:---:|
+| ![Help](assets/help.png) | ![Notes](assets/notes.png) |
+
 ---
 
 ## Install
@@ -69,6 +85,14 @@ resume init --install-hook
 This appends a small hook to `~/.zshrc` (zsh) or `~/.bashrc` (bash) that logs commands
 to the active session. It's idempotent — safe to re-run. It also adds `.resume/` to your
 project's `.gitignore`.
+
+---
+
+## IDE Integration
+
+`resume` currently has first-class **VS Code** integration built in — the `.vscode/` config sets up truecolor support so Resy and the briefing render with full color in the terminal panel.
+
+> **Other editors:** `resume` works in any terminal emulator — just run `resume` from your project directory. Integrations for other IDEs are planned.
 
 ---
 
