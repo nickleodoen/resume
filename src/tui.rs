@@ -134,6 +134,9 @@ struct App {
     briefing: Option<String>,
     briefing_header: Option<String>,
     briefing_loading: bool,
+    // Cache: briefing text + event count at generation time.
+    // Invalidated when events.len() grows (new file/git activity).
+    cached_briefing: Option<(String, usize)>,
     scroll_offset: u16,
     scroll_max: u16,
     available_models: Vec<&'static ModelInfo>,
@@ -151,6 +154,7 @@ impl App {
             briefing: None,
             briefing_header: None,
             briefing_loading: false,
+            cached_briefing: None,
             scroll_offset: 0,
             scroll_max: 0,
             available_models,
@@ -204,6 +208,22 @@ impl App {
                 } else if self.briefing_loading {
                     self.message = Some("Already generating a briefing…".to_string());
                     Cmd::Stay
+                } else if let Some((text, event_count)) = &self.cached_briefing {
+                    // Cache hit: serve instantly if no new events since generation.
+                    if *event_count == self.events.len() {
+                        self.briefing = Some(text.clone());
+                        self.briefing_header = Some("Briefing".to_string());
+                        self.scroll_offset = 0;
+                        self.message = None;
+                        Cmd::Stay
+                    } else {
+                        // New events recorded — cache is stale, fetch fresh.
+                        self.briefing_loading = true;
+                        self.briefing = None;
+                        self.briefing_header = None;
+                        self.message = None;
+                        Cmd::SpawnBriefing
+                    }
                 } else {
                     self.briefing_loading = true;
                     self.briefing = None;
@@ -350,6 +370,7 @@ async fn run_loop(
                     app.briefing_loading = false;
                     match msg {
                         BriefingMsg::Startup(Ok(text)) => {
+                            app.cached_briefing = Some((text.clone(), app.events.len()));
                             app.briefing = Some(text);
                             app.briefing_header = Some("Briefing".to_string());
                             app.scroll_offset = 0;
@@ -358,6 +379,7 @@ async fn run_loop(
                             // No previous session or API error on startup — silent.
                         }
                         BriefingMsg::UserRequested(Ok(text)) => {
+                            app.cached_briefing = Some((text.clone(), app.events.len()));
                             app.briefing = Some(text);
                             app.briefing_header = Some("Briefing".to_string());
                             app.scroll_offset = 0;
@@ -424,6 +446,7 @@ async fn run_loop(
                                                     app.events.clear();
                                                     app.briefing = None;
                                                     app.briefing_header = None;
+                                                    app.cached_briefing = None;
                                                     app.scroll_offset = 0;
                                                     app.message = Some(format!(
                                                         "Session saved · {} event{} · fresh session started",
