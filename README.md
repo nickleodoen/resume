@@ -8,13 +8,38 @@ plain-English briefing of what you were doing, what you finished, and what to do
 
 ---
 
+## Install
+
+### Option 1 — Download a pre-built binary (no Rust required)
+
+Go to the [Releases page](https://github.com/nickleodoen/resume/releases) and download
+the archive for your platform:
+
+| Platform | File |
+|---|---|
+| macOS Apple Silicon | `resume-vX.Y.Z-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `resume-vX.Y.Z-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64 | `resume-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` |
+
+Extract and move to your PATH:
+
+```bash
+tar -xzf resume-*.tar.gz
+sudo mv resume /usr/local/bin/
+```
+
+### Option 2 — Install with Cargo
+
+```bash
+cargo install --git https://github.com/nickleodoen/resume
+```
+
+---
+
 ## Quick Start
 
 ```bash
-# Build and install
-cargo install --path .
-
-# Set your Anthropic API key — add this to ~/.zshrc or ~/.bashrc to make it permanent
+# Set your Anthropic API key — add to ~/.zshrc or ~/.bashrc to make it permanent
 export ANTHROPIC_API_KEY=sk-ant-...
 
 # Or store it in a .env file in your project (resume loads it automatically)
@@ -102,9 +127,9 @@ available local models on startup automatically.
 
 ## Requirements
 
-- Rust 1.85+
 - macOS or Linux
 - `ANTHROPIC_API_KEY` **or** at least one Ollama model pulled and `ollama serve` running
+- Rust 1.89+ only if installing via `cargo install`
 
 ---
 
