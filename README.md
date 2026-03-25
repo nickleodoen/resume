@@ -16,7 +16,7 @@ plain-English briefing of what you were doing, what you finished, and what to do
 
 | Dashboard | Briefing |
 |:---:|:---:|
-| ![Dashboard](assets/vscode.png) | ![Briefing](assets/briefing.png) |
+| ![Dashboard](assets/vscode_TUI.png) | ![Briefing](assets/briefing.png) |
 
 | Help & Models | Notes |
 |:---:|:---:|
